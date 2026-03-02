@@ -1,0 +1,30 @@
+{
+  "name": "books-reader",
+  "version": "0.1.0",
+  "description": "Read Apple Books pages via Peekaboo + vision OCR",
+  "type": "module",
+  "bin": {
+    "books-reader": "./dist/index.js",
+    "reader": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "read": "tsx src/index.ts",
+    "pages": "tsx src/index.ts pages",
+    "agent": "tsx src/index.ts agent",
+    "chat": "tsx src/index.ts chat"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
