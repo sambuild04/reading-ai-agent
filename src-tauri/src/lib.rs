@@ -25,6 +25,7 @@ pub fn run() {
             prev_page,
             scroll_down,
             search_book,
+            computer_use_task,
             get_config,
         ])
         .run(tauri::generate_context!())

@@ -354,6 +354,373 @@ fn capture_page_internal() -> Result<String, String> {
     Ok(b64)
 }
 
+// ---------------------------------------------------------------------------
+// GPT-5.4 Computer Use Agent — screenshot → model → actions → repeat
+// ---------------------------------------------------------------------------
+
+/// Get the macOS logical screen size (points, not pixels).
+fn get_logical_screen_size() -> (u32, u32) {
+    let output = Command::new("/usr/bin/osascript")
+        .args(["-e", "tell application \"Finder\" to get bounds of window of desktop"])
+        .output();
+    if let Ok(out) = output {
+        let s = String::from_utf8_lossy(&out.stdout);
+        let parts: Vec<&str> = s.trim().split(", ").collect();
+        if parts.len() == 4 {
+            let w: u32 = parts[2].parse().unwrap_or(1440);
+            let h: u32 = parts[3].parse().unwrap_or(900);
+            return (w, h);
+        }
+    }
+    (1440, 900)
+}
+
+/// Capture full screen, resize to logical resolution (1440x900 recommended by
+/// OpenAI for CUA), convert to JPEG, return base64.
+fn capture_screen_for_cua() -> Result<(String, u32, u32), String> {
+    let tmp = "/tmp/samuel-cua-screen.png";
+    let tmp_resized = "/tmp/samuel-cua-resized.jpg";
+    let debug_copy = "/tmp/samuel-cua-debug.jpg";
+
+    let sc_output = Command::new("/usr/sbin/screencapture")
+        .args(["-x", "-C", tmp])
+        .output()
+        .map_err(|e| format!("screencapture failed: {e}"))?;
+
+    if !sc_output.status.success() {
+        let stderr = String::from_utf8_lossy(&sc_output.stderr);
+        return Err(format!("screencapture error: {stderr}"));
+    }
+
+    let raw_size = fs::metadata(tmp).map(|m| m.len()).unwrap_or(0);
+    if raw_size < 1000 {
+        let _ = fs::remove_file(tmp);
+        return Err(format!(
+            "Screen capture too small ({raw_size} bytes) — check Screen Recording permission \
+             in System Settings > Privacy & Security"
+        ));
+    }
+
+    let (logical_w, logical_h) = get_logical_screen_size();
+
+    let sips_output = Command::new("/usr/bin/sips")
+        .args([
+            "--resampleWidth", &logical_w.to_string(),
+            "--resampleHeight", &logical_h.to_string(),
+            "--setProperty", "format", "jpeg",
+            "--setProperty", "formatOptions", "80",
+            tmp,
+            "--out", tmp_resized,
+        ])
+        .output()
+        .map_err(|e| format!("sips resize failed: {e}"))?;
+
+    let _ = fs::remove_file(tmp);
+
+    if !sips_output.status.success() {
+        return Err("Failed to resize/compress screenshot via sips".to_string());
+    }
+
+    let data = fs::read(tmp_resized).map_err(|e| format!("Read resized screenshot: {e}"))?;
+    let _ = fs::copy(tmp_resized, debug_copy);
+    let _ = fs::remove_file(tmp_resized);
+
+    eprintln!("[cua] screenshot: {}x{}, {} bytes JPEG", logical_w, logical_h, data.len());
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    Ok((b64, logical_w, logical_h))
+}
+
+/// Call the OpenAI Responses API (POST /v1/responses).
+fn call_responses_api(api_key: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let body_path = "/tmp/samuel-cua-req.json";
+    let body_str = serde_json::to_string(body).map_err(|e| format!("JSON error: {e}"))?;
+
+    // Log request size (not content — may contain base64 images)
+    eprintln!("[cua-api] POST /v1/responses — {} bytes", body_str.len());
+
+    fs::write(body_path, &body_str).map_err(|e| format!("Write req body: {e}"))?;
+
+    let output = Command::new("/usr/bin/curl")
+        .args([
+            "-s",
+            "--max-time", "90",
+            "-X", "POST",
+            "https://api.openai.com/v1/responses",
+            "-H", &format!("Authorization: Bearer {api_key}"),
+            "-H", "Content-Type: application/json",
+            "--data-binary", &format!("@{body_path}"),
+        ])
+        .output()
+        .map_err(|e| format!("Responses API call failed: {e}"))?;
+
+    let _ = fs::remove_file(body_path);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("[cua-api] curl failed: {stderr}");
+        return Err(format!("curl failed: {stderr}"));
+    }
+
+    let response_str = String::from_utf8_lossy(&output.stdout).to_string();
+    if response_str.is_empty() {
+        eprintln!("[cua-api] empty response (timeout or network error)");
+        return Err("Responses API returned empty (timeout?)".to_string());
+    }
+
+    let resp: serde_json::Value = serde_json::from_str(&response_str)
+        .map_err(|e| {
+            eprintln!("[cua-api] parse error: {e} — raw: {}", &response_str[..500.min(response_str.len())]);
+            format!("Parse Responses API: {e}")
+        })?;
+
+    if let Some(err) = resp.get("error") {
+        eprintln!("[cua-api] API error: {err}");
+        return Err(format!("Responses API error: {err}"));
+    }
+
+    eprintln!("[cua-api] OK — response id={}", resp["id"].as_str().unwrap_or("?"));
+    Ok(resp)
+}
+
+/// Execute a single CUA action via peekaboo / osascript.
+fn execute_cua_action(action: &serde_json::Value) -> Result<(), String> {
+    let action_type = action["type"].as_str().unwrap_or("");
+    eprintln!("[cua] action: {action_type} — {action}");
+
+    match action_type {
+        "screenshot" => { /* no-op, we always capture after */ }
+
+        "click" => {
+            let x = action["x"].as_i64().unwrap_or(0);
+            let y = action["y"].as_i64().unwrap_or(0);
+            let coords = format!("{x},{y}");
+            run_peekaboo(&["click", "--coords", &coords])?;
+        }
+
+        "double_click" => {
+            let x = action["x"].as_i64().unwrap_or(0);
+            let y = action["y"].as_i64().unwrap_or(0);
+            let coords = format!("{x},{y}");
+            // Click twice rapidly
+            run_peekaboo(&["click", "--coords", &coords])?;
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            run_peekaboo(&["click", "--coords", &coords])?;
+        }
+
+        "type" => {
+            let text = action["text"].as_str().unwrap_or("");
+            if !text.is_empty() {
+                run_peekaboo(&["type", text])?;
+            }
+        }
+
+        "keypress" => {
+            // keys can be a string or array of strings
+            let keys_str = if let Some(arr) = action["keys"].as_array() {
+                arr.iter()
+                    .filter_map(|k| k.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            } else if let Some(s) = action["keys"].as_str() {
+                s.to_string()
+            } else {
+                return Ok(());
+            };
+            if !keys_str.is_empty() {
+                run_peekaboo(&["hotkey", "--keys", &keys_str])?;
+            }
+        }
+
+        "scroll" => {
+            let scroll_y = action["scroll_y"].as_i64().unwrap_or(0);
+            let scroll_x = action["scroll_x"].as_i64().unwrap_or(0);
+            if scroll_y != 0 {
+                let dir = if scroll_y < 0 { "up" } else { "down" };
+                let amt = scroll_y.unsigned_abs().min(20).to_string();
+                let x = action["x"].as_i64().unwrap_or(0);
+                let y = action["y"].as_i64().unwrap_or(0);
+                let coords = format!("{x},{y}");
+                run_peekaboo(&["scroll", "--direction", dir, "--amount", &amt, "--coords", &coords])?;
+            }
+            if scroll_x != 0 {
+                let dir = if scroll_x < 0 { "left" } else { "right" };
+                let amt = scroll_x.unsigned_abs().min(20).to_string();
+                run_peekaboo(&["scroll", "--direction", dir, "--amount", &amt])?;
+            }
+        }
+
+        "wait" => {
+            let ms = action["ms"].as_u64().unwrap_or(1000);
+            std::thread::sleep(std::time::Duration::from_millis(ms.min(5000)));
+        }
+
+        "move" => {
+            let x = action["x"].as_i64().unwrap_or(0);
+            let y = action["y"].as_i64().unwrap_or(0);
+            let coords = format!("{x},{y}");
+            run_peekaboo(&["click", "--coords", &coords])?;
+        }
+
+        other => {
+            eprintln!("[cua] unknown action type: {other}");
+        }
+    }
+    Ok(())
+}
+
+/// Extract text output from the Responses API result.
+fn extract_cua_text(response: &serde_json::Value) -> String {
+    let output = response["output"].as_array();
+    if let Some(items) = output {
+        for item in items {
+            let item_type = item["type"].as_str().unwrap_or("");
+            if item_type == "message" {
+                if let Some(content) = item["content"].as_array() {
+                    for c in content {
+                        if c["type"].as_str() == Some("output_text") {
+                            if let Some(text) = c["text"].as_str() {
+                                return text.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    "(No text output from computer use agent)".to_string()
+}
+
+/// Find a computer_call in the response output.
+fn find_computer_call(response: &serde_json::Value) -> Option<serde_json::Value> {
+    let output = response["output"].as_array()?;
+    for item in output {
+        if item["type"].as_str() == Some("computer_call") {
+            return Some(item.clone());
+        }
+    }
+    None
+}
+
+/// Run a GPT-5.4 Computer Use task against Apple Books.
+/// Takes a natural language instruction, drives the UI, and returns the result.
+#[tauri::command]
+pub async fn computer_use_task(task: String) -> Result<String, String> {
+    let config = read_config_internal()?;
+    let api_key = config.api_key.ok_or("No API key in ~/.books-reader.json")?;
+
+    eprintln!("[cua] starting task: {}", &task[..task.len().min(120)]);
+    activate_books()?;
+
+    let (logical_w, logical_h) = get_logical_screen_size();
+    eprintln!("[cua] screen: {}x{}", logical_w, logical_h);
+
+    // Capture an initial screenshot so the model can see the current state
+    // and skip the screenshot-first round-trip.
+    let (init_screenshot, _, _) = capture_screen_for_cua()?;
+    eprintln!("[cua] initial screenshot: {} bytes b64", init_screenshot.len());
+
+    let computer_tool = serde_json::json!({
+        "type": "computer",
+        "display_width": logical_w,
+        "display_height": logical_h,
+        "environment": "mac"
+    });
+
+    let first_body = serde_json::json!({
+        "model": "gpt-5.4",
+        "tools": [computer_tool],
+        "input": [
+            {
+                "role": "developer",
+                "content": "You are helping a user interact with Apple Books on macOS. \
+                    The user has purchased this book. You can see their screen. \
+                    Perform the requested task COMPLETELY — do not stop early. \
+                    If the task involves multiple steps (e.g. navigating to a chapter), \
+                    keep going until you have fully completed it. \
+                    When asked to read or transcribe text, include ALL visible book text \
+                    in your final text response."
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": task
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": format!("data:image/jpeg;base64,{init_screenshot}")
+                    }
+                ]
+            }
+        ]
+    });
+
+    eprintln!("[cua] sending first request to gpt-5.4...");
+    let mut response = call_responses_api(&api_key, &first_body)?;
+    eprintln!("[cua] first response received, id={}", response["id"].as_str().unwrap_or("?"));
+
+    // CUA loop — max 20 turns
+    for turn in 0..20 {
+        let call = match find_computer_call(&response) {
+            Some(c) => c,
+            None => {
+                eprintln!("[cua] no more computer_call — done after {} turns", turn);
+                break;
+            }
+        };
+
+        let call_id = call["call_id"].as_str().unwrap_or("").to_string();
+        let resp_id = response["id"].as_str().unwrap_or("").to_string();
+
+        // GPT-5.4 GA returns batched actions[]; preview returns single action
+        let actions: Vec<serde_json::Value> = if let Some(arr) = call["actions"].as_array() {
+            arr.clone()
+        } else if !call["action"].is_null() {
+            vec![call["action"].clone()]
+        } else {
+            vec![]
+        };
+
+        eprintln!("[cua] turn {}: {} action(s), call_id={}", turn, actions.len(), call_id);
+
+        for action in &actions {
+            let action_type = action["type"].as_str().unwrap_or("");
+            if action_type == "screenshot" {
+                continue; // we always capture after executing
+            }
+            execute_cua_action(action)?;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let (screenshot_b64, _, _) = capture_screen_for_cua()?;
+        eprintln!("[cua] turn {}: captured screenshot, sending back", turn);
+
+        let follow_up = serde_json::json!({
+            "model": "gpt-5.4",
+            "tools": [computer_tool],
+            "previous_response_id": resp_id,
+            "input": [{
+                "type": "computer_call_output",
+                "call_id": call_id,
+                "output": {
+                    "type": "computer_screenshot",
+                    "image_url": format!("data:image/jpeg;base64,{screenshot_b64}")
+                }
+            }]
+        });
+
+        response = call_responses_api(&api_key, &follow_up)?;
+    }
+
+    let result = extract_cua_text(&response);
+    eprintln!("[cua] final result: {} chars", result.len());
+    Ok(result)
+}
+
 /// Read the user config from ~/.books-reader.json.
 #[tauri::command]
 pub async fn get_config() -> Result<Config, String> {
