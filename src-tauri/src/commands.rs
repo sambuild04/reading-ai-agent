@@ -354,6 +354,88 @@ fn capture_page_internal() -> Result<String, String> {
     Ok(b64)
 }
 
+/// Capture the full screen (any active app) and return base64 JPEG.
+#[tauri::command]
+pub async fn capture_screen() -> Result<String, String> {
+    let (b64, w, h) = capture_screen_for_cua()?;
+    eprintln!("[capture_screen] {}x{}, {} bytes b64", w, h, b64.len());
+    Ok(b64)
+}
+
+/// Capture the frontmost window (whichever app is focused) as a base64 JPEG.
+/// Handles multi-monitor correctly — targets the specific window, not the full screen.
+#[tauri::command]
+pub async fn capture_active_window() -> Result<String, String> {
+    capture_focused_window()
+}
+
+/// Internal helper — captures the frontmost window via peekaboo,
+/// falls back to main display if peekaboo can't target the app.
+fn capture_focused_window() -> Result<String, String> {
+    let tmp_png = "/tmp/samuel-screen.png";
+    let tmp_jpg = "/tmp/samuel-screen.jpg";
+    let debug_jpg = "/tmp/samuel-screen-debug.jpg";
+
+    let app_output = Command::new("/usr/bin/osascript")
+        .args(["-e", "tell application \"System Events\" to get name of first application process whose frontmost is true"])
+        .output()
+        .map_err(|e| format!("Get frontmost app: {e}"))?;
+    let frontmost_app = String::from_utf8_lossy(&app_output.stdout).trim().to_string();
+    eprintln!("[capture] frontmost app: {frontmost_app}");
+
+    let capture_result = run_peekaboo(&[
+        "image",
+        "--app", &frontmost_app,
+        "--format", "png",
+        "--path", tmp_png,
+    ]);
+
+    if capture_result.is_err() {
+        eprintln!("[capture] peekaboo failed for {frontmost_app}, falling back to main display");
+        let sc = Command::new("/usr/sbin/screencapture")
+            .args(["-x", "-D1", tmp_png])
+            .output()
+            .map_err(|e| format!("screencapture failed: {e}"))?;
+        if !sc.status.success() {
+            return Err("screencapture failed".to_string());
+        }
+    }
+
+    let data = fs::read(tmp_png).map_err(|e| format!("Read capture: {e}"))?;
+    eprintln!("[capture] raw PNG: {} bytes", data.len());
+
+    if data.len() < 1000 {
+        let _ = fs::remove_file(tmp_png);
+        return Err("Captured image too small — check Screen Recording permissions.".to_string());
+    }
+
+    let sips_result = Command::new("/usr/bin/sips")
+        .args([
+            "--resampleWidth", "1024",
+            "--setProperty", "format", "jpeg",
+            "--setProperty", "formatOptions", "60",
+            tmp_png,
+            "--out", tmp_jpg,
+        ])
+        .output();
+
+    let _ = fs::remove_file(tmp_png);
+
+    let final_path = match sips_result {
+        Ok(output) if output.status.success() => tmp_jpg,
+        _ => return Err("Failed to resize screenshot".to_string()),
+    };
+
+    let jpg_data = fs::read(final_path).map_err(|e| format!("Read JPEG: {e}"))?;
+    eprintln!("[capture] focused window JPEG: {} bytes", jpg_data.len());
+
+    let _ = fs::copy(final_path, debug_jpg);
+    let _ = fs::remove_file(final_path);
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&jpg_data);
+    Ok(b64)
+}
+
 // ---------------------------------------------------------------------------
 // GPT-5.4 Computer Use Agent — screenshot → model → actions → repeat
 // ---------------------------------------------------------------------------

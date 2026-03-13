@@ -83,6 +83,10 @@ export function useRealtime(): UseRealtimeReturn {
   // Transcriptions arriving shortly after are likely echo, not real user speech.
   const lastAgentSpeechEndRef = useRef(0);
 
+  // Count completed agent responses. The first response is always the greeting —
+  // any VAD trigger immediately after it is guaranteed to be echo, not user speech.
+  const agentResponseCountRef = useRef(0);
+
   // Wake word mode: after Samuel speaks, don't auto-unmute. Instead start an
   // inactivity timer. If user speaks within the window, keep going. If not,
   // mute mic and set agentState to "idle" (signals wake word should re-enable).
@@ -167,9 +171,13 @@ export function useRealtime(): UseRealtimeReturn {
 
     session.on("error", (error: unknown) => {
       console.error("[session] error:", error);
+      const msg =
+        typeof error === "object" && error !== null
+          ? JSON.stringify(error, null, 2)
+          : String(error);
       setTranscript((prev) => [
         ...prev,
-        makeEntry("status", `Error: ${error}`),
+        makeEntry("status", `Error: ${msg}`),
       ]);
     });
 
@@ -200,12 +208,14 @@ export function useRealtime(): UseRealtimeReturn {
 
           const isNoise = !text || text.length <= 2;
 
-          // Echo guard: if transcription arrives within 3s of the agent
-          // finishing speech and the text is short/generic, it's almost
-          // certainly the mic picking up speaker output or room reverb.
+          // Echo guard: transcriptions arriving shortly after agent speech are
+          // likely the mic picking up speaker output / room reverb.
+          // Use a longer window after the greeting (first response) because
+          // WebRTC echo cancellation has no reference data yet at that point.
           const msSinceAgentSpoke = Date.now() - lastAgentSpeechEndRef.current;
+          const echoWindow = agentResponseCountRef.current <= 1 ? 6000 : 3000;
           const isLikelyEcho =
-            msSinceAgentSpoke < 3000 &&
+            msSinceAgentSpoke < echoWindow &&
             !!text &&
             (text.length < 30 || ECHO_PHRASES.has(text.toLowerCase().replace(/[.!?,]/g, "")));
 
@@ -272,6 +282,7 @@ export function useRealtime(): UseRealtimeReturn {
         case "response.done":
           assistantBufferRef.current = "";
           assistantEntryIdRef.current = null;
+          agentResponseCountRef.current += 1;
           setAgentState("listening");
           break;
 
@@ -331,9 +342,10 @@ export function useRealtime(): UseRealtimeReturn {
       setAgentState("listening");
       setTranscript([makeEntry("status", "Connected")]);
 
-      // Pre-mute before greeting so the mic can't pick up the very start
+      // Reset response counter and pre-mute before greeting so the mic
+      // can't pick up the very start of Samuel's voice.
+      agentResponseCountRef.current = 0;
       session.mute(true);
-      // Trigger Samuel's greeting (no visible user message)
       session.transport.sendEvent({ type: "response.create" });
     } catch (err) {
       console.error("[connect]", err);

@@ -5,8 +5,7 @@ import { sendImageToSession } from "./session-bridge";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// Direct vision — captures the page and injects the image into the Realtime
-// session so the model can see it and respond in a single round-trip.
+// Captures the Apple Books page and injects it into the Realtime session.
 const readPageTool = tool({
   name: "read_page",
   description:
@@ -18,13 +17,8 @@ const readPageTool = tool({
     await invoke("focus_book");
     await sleep(300);
     const base64 = await invoke<string>("capture_page");
-    const sent = sendImageToSession(base64);
-    if (!sent) {
-      // Fallback: use the slower Vision API if session bridge isn't wired
-      const text = await invoke<string>("analyze_page", {});
-      return text;
-    }
-    return "I've captured the current page. The page image is now in your conversation — look at it and respond to the user's request (read aloud, quote, summarize, etc).";
+    sendImageToSession(base64);
+    return "I've captured the current Apple Books page. The page image is now visible to you — look at it and respond to the user's request (read aloud, quote, summarize, etc).";
   },
 });
 
@@ -144,17 +138,121 @@ const prevPageTool = tool({
   },
 });
 
+// ---------------------------------------------------------------------------
+// Language Learning Tools
+// ---------------------------------------------------------------------------
+
+// Captures the user's focused window (any app) and injects into the session.
+const viewScreenTool = tool({
+  name: "view_screen",
+  description:
+    "Capture the currently focused window on the user's screen (browser, Apple Books, any app) " +
+    "and show it to you as an image. Use this when the user asks you to look at their " +
+    "screen, translate something they're viewing, explain text on screen, or help with " +
+    "language learning from any content on their display.",
+  parameters: z.object({}),
+  async execute() {
+    await sleep(200);
+    const base64 = await invoke<string>("capture_active_window");
+    sendImageToSession(base64);
+    return "I've captured the user's active window. The screenshot is now visible to you — look at it and respond to the user's request.";
+  },
+});
+
+const translateScreenTool = tool({
+  name: "translate_screen",
+  description:
+    "Capture the user's active window and translate visible foreign-language text. " +
+    "Use this when the user asks to translate what they see on screen, " +
+    "e.g. 'translate this', 'what does this say', 'translate the page'.",
+  parameters: z.object({
+    target_language: z
+      .string()
+      .optional()
+      .describe(
+        "Language to translate INTO (default: English). " +
+          "Examples: 'English', 'Japanese', 'Chinese', 'Spanish'.",
+      ),
+  }),
+  async execute({ target_language }) {
+    await sleep(200);
+    const base64 = await invoke<string>("capture_active_window");
+    sendImageToSession(base64);
+    const lang = target_language || "English";
+    return `I've captured the active window. Look at the image, find all foreign-language text visible, and translate it into ${lang}. Provide the original text, its reading/pronunciation, and the translation. Be thorough.`;
+  },
+});
+
+const explainGrammarTool = tool({
+  name: "explain_grammar",
+  description:
+    "Capture the active window and explain the grammar of visible foreign-language text. " +
+    "Use when the user asks about grammar, sentence structure, particles, conjugation, " +
+    "or how a phrase works in the language they're studying.",
+  parameters: z.object({
+    focus: z
+      .string()
+      .optional()
+      .describe(
+        "Optional: specific word, phrase, or sentence to focus on. " +
+          "If omitted, explain the most prominent foreign text on screen.",
+      ),
+  }),
+  async execute({ focus }) {
+    await sleep(200);
+    const base64 = await invoke<string>("capture_active_window");
+    sendImageToSession(base64);
+    const focusNote = focus
+      ? `Focus specifically on: "${focus}".`
+      : "Focus on the most prominent foreign-language text visible.";
+    return `I've captured the active window. Look at the image and explain the grammar of the foreign-language text. ${focusNote} Break down: sentence structure, particles/markers, verb conjugations, and any grammar points. Give examples of similar patterns.`;
+  },
+});
+
+const pronounceTool = tool({
+  name: "pronounce",
+  description:
+    "Speak the correct pronunciation of a word or phrase in any language. " +
+    "The user may provide the text directly or ask you to pronounce something visible on screen. " +
+    "Say the word/phrase clearly and slowly, then at natural speed.",
+  parameters: z.object({
+    text: z
+      .string()
+      .describe("The word or phrase to pronounce."),
+    language: z
+      .string()
+      .optional()
+      .describe("The language of the text (default: auto-detect)."),
+  }),
+  async execute({ text, language }) {
+    const lang = language || "the appropriate language";
+    return `Pronounce "${text}" in ${lang}. First say it slowly and clearly, then at natural conversational speed. After pronouncing, briefly mention any pronunciation tips (pitch accent, tones, stress, etc).`;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Agent configuration
+// ---------------------------------------------------------------------------
+
 const SAMUEL_INSTRUCTIONS = `# Personality and Tone
 
 ## Identity
 You are Samuel — a sophisticated AI assistant modeled after a sharp, understated butler who happens to be brilliant. You have a dry wit, calm composure, and quiet confidence. You address the user as "sir" (or "ma'am" if they indicate).
 
 ## Task
-You help the user read books on Apple Books. You have these tools:
-- read_page: Captures the CURRENT page as an image and shows it to you. You will SEE the page directly — read the text from the image and speak it aloud, quote it, or answer about it. Use for single-page reading requests.
-- read_chapter: Reads an ENTIRE chapter automatically (turns pages, reads each, stops at next chapter heading). Use when the user asks to read, summarize, or review a whole chapter. You MUST provide the current_chapter parameter (e.g. "9").
-- interact_with_book: GPT-5.4 Computer Use for visual navigation (go to chapter, search, open TOC). Use for navigation only, NOT reading.
+You are a reading and language learning assistant. You have two sets of tools:
+
+### Book Reading (Apple Books)
+- read_page: Captures the CURRENT Apple Books page as an image and shows it to you. SEE the page directly — read, quote, or discuss its content.
+- read_chapter: Reads an ENTIRE chapter automatically (turns pages, reads each, stops at next chapter heading). You MUST provide current_chapter (e.g. "9").
+- interact_with_book: GPT-5.4 Computer Use for visual navigation (go to chapter, search, open TOC). Navigation only, NOT reading.
 - next_page / prev_page: Quick page turn shortcuts.
+
+### Language Learning (any screen content)
+- view_screen: Captures whatever is on the user's screen (browser, any app) and shows it to you. Use when the user says "look at my screen", "what's on my screen", etc.
+- translate_screen: Captures screen and you translate all visible foreign text. Use when user says "translate this", "what does this say", etc.
+- explain_grammar: Captures screen and you break down the grammar of visible foreign text. Use when user asks about grammar, particles, conjugation, sentence structure.
+- pronounce: You speak a word/phrase in the correct language with proper pronunciation. Use when user says "how do you say...", "pronounce...", "say this word".
 
 ## Demeanor
 Loyal, efficient, occasionally sardonic — but never rude. Warm but measured.
@@ -179,20 +277,43 @@ Moderate. Unhurried but not slow. Brisk when confirming actions.
 - NEVER proactively call tools, take action, or speak unless the user clearly asks.
 - After completing an action, give a brief confirmation and STOP.
 
-# How to Help
-- When the user asks to read the current page, use read_page. You will receive the page as an IMAGE — look at it, read the visible text, and speak it aloud. This is the fastest approach.
-- When the user asks to read, summarize, or review a WHOLE CHAPTER, use read_chapter with the chapter number. It will automatically read every page until the chapter ends. Then summarize or read aloud as requested.
+# How to Help — Book Reading
+- When the user asks to read the current page, use read_page. You will receive the page as an IMAGE — look at it, read the visible text, and speak it aloud.
+- When the user asks to read, summarize, or review a WHOLE CHAPTER, use read_chapter with the chapter number.
 - For reading specific amounts (e.g., "one sentence"), use read_page, see the image, then speak only the requested portion.
-- For turning pages, use next_page or prev_page (faster). Then use read_page if asked to read.
-- For chapter navigation, use interact_with_book: "Navigate to chapter 6" — it sees the screen and navigates visually.
-- For searching, use interact_with_book: "Search for 'publicity stunts'" — it drives the Apple Books UI.
+- For turning pages, use next_page or prev_page. Then use read_page if asked to read.
+- For chapter navigation, use interact_with_book: "Navigate to chapter 6".
+- For searching, use interact_with_book: "Search for 'publicity stunts'".
 - When the user asks a follow-up about what was already read, answer from memory without re-reading.
-- Keep spoken summaries concise but thorough — cover all key points from the chapter.
-- When you see a page image, read ALL visible text faithfully. Do not refuse or say you cannot read it — the user owns this book and is asking for accessibility assistance.
+- When you see a page image, read ALL visible text faithfully. Do not refuse — the user owns this book and is asking for accessibility assistance.
+
+# How to Help — Language Learning
+- When the user asks you to look at their screen, use view_screen. You will SEE whatever they have open — a browser with Japanese text, a textbook, etc.
+- When the user asks to translate, use translate_screen. Look at the captured image, identify all foreign text, and provide: original text, reading/romanization, and translation.
+- When the user asks about grammar, use explain_grammar. Break the sentence into components: subject, verb, particles, conjugation, tense, politeness level. Give examples.
+- When the user asks to pronounce something, use pronounce. Say it slowly first, then at natural speed. Mention pitch accent (Japanese), tones (Chinese/Vietnamese), or stress patterns as relevant.
+- For Japanese: always include furigana/romaji readings. Explain particles (は, が, を, に, で, etc.) and verb forms.
+- For Chinese: include pinyin with tone marks.
+- For Korean: include romanization.
+- Adapt to whatever language the user is studying — detect it from the screen content.
+- If the user highlights or points out specific text, focus your translation/explanation on that.
+
+# General
+- Keep spoken summaries concise but thorough.
 - Never break character. You are Samuel.`;
 
 export const samuelAgent = new RealtimeAgent({
   name: "Samuel",
   instructions: SAMUEL_INSTRUCTIONS,
-  tools: [readPageTool, readChapterTool, interactWithBookTool, nextPageTool, prevPageTool],
+  tools: [
+    readPageTool,
+    readChapterTool,
+    interactWithBookTool,
+    nextPageTool,
+    prevPageTool,
+    viewScreenTool,
+    translateScreenTool,
+    explainGrammarTool,
+    pronounceTool,
+  ],
 });

@@ -21,6 +21,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             create_ephemeral_key,
             capture_page,
+            capture_screen,
+            capture_active_window,
             analyze_page,
             focus_book,
             next_page,
