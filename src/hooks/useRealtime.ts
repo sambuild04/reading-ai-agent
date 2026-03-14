@@ -100,9 +100,17 @@ export function useRealtime(): UseRealtimeReturn {
   // Transcriptions arriving shortly after are likely echo, not real user speech.
   const lastAgentSpeechEndRef = useRef(0);
 
+  // Keep track of the last full agent response text — used to detect echo that
+  // partially repeats what Samuel just said.
+  const lastAgentTextRef = useRef("");
+
   // Count completed agent responses. The first response is always the greeting —
   // any VAD trigger immediately after it is guaranteed to be echo, not user speech.
   const agentResponseCountRef = useRef(0);
+
+  // True while a response is being generated (audio may still be playing).
+  // Mic stays muted until this goes false + delay, preventing mid-sentence cutoff.
+  const responseInProgressRef = useRef(false);
 
   // Wake word mode: after Samuel speaks, don't auto-unmute. Instead start an
   // inactivity timer. If user speaks within the window, keep going. If not,
@@ -143,10 +151,9 @@ export function useRealtime(): UseRealtimeReturn {
             },
             noiseReduction: { type: "far_field" },
             turnDetection: {
-              type: "server_vad",
-              threshold: 0.9,
+              type: "semantic_vad",
+              eagerness: "low",
               prefixPaddingMs: 300,
-              silenceDurationMs: 1000,
             },
           },
           output: {
@@ -159,30 +166,21 @@ export function useRealtime(): UseRealtimeReturn {
     sessionRef.current = session;
 
     // Auto-mute mic while Samuel speaks to prevent echo feedback in WKWebView.
-    // Unmute after a short delay once he finishes.
+    // Mic stays muted until response.done + delay (not audio_stopped) so the
+    // full sentence plays without risk of VAD-triggered cancellation mid-speech.
     session.on("audio_start", () => {
       setAgentState("speaking");
+      responseInProgressRef.current = true;
       if (!userMutedRef.current) {
         session.mute(true);
       }
     });
 
     session.on("audio_stopped", () => {
-      setAgentState("listening");
       lastAgentSpeechEndRef.current = Date.now();
-      if (!userMutedRef.current && session.muted === true) {
-        // Longer buffer after the greeting (first response) — WebRTC echo
-        // cancellation has no reference data yet, so reverb lingers longer.
-        const isGreeting = agentResponseCountRef.current === 0;
-        const unmuteDelay = isGreeting ? 3000 : 1500;
-        setTimeout(() => {
-          if (!userMutedRef.current && sessionRef.current) {
-            try { sessionRef.current.mute(false); } catch {}
-          }
-          if (wakeWordModeRef.current) {
-            startInactivityTimer();
-          }
-        }, unmuteDelay);
+      // Don't unmute here — wait for response.done to ensure full playback
+      if (!responseInProgressRef.current) {
+        setAgentState("listening");
       }
     });
 
@@ -235,15 +233,21 @@ export function useRealtime(): UseRealtimeReturn {
           // under 50 chars — greeting echoes are always short fragments.
           const msSinceAgentSpoke = Date.now() - lastAgentSpeechEndRef.current;
           const isGreetingWindow = agentResponseCountRef.current <= 1;
-          const echoWindow = isGreetingWindow ? 8000 : 3000;
+          const echoWindow = isGreetingWindow ? 8000 : 4000;
           const normalized = text ? text.toLowerCase().replace(/[.!?,'"]/g, "").trim() : "";
+
+          // Check if the transcription is a partial echo of what Samuel just said
+          const lastAgentLower = lastAgentTextRef.current.toLowerCase();
+          const isPartialEcho = normalized.length > 3 && lastAgentLower.includes(normalized);
+
           const isLikelyEcho =
             msSinceAgentSpoke < echoWindow &&
             !!text &&
             (
               (isGreetingWindow && text.length < 50) ||
               text.length < 30 ||
-              ECHO_PHRASES.has(normalized)
+              ECHO_PHRASES.has(normalized) ||
+              isPartialEcho
             );
 
           if (isNoise || isLikelyEcho) {
@@ -293,25 +297,49 @@ export function useRealtime(): UseRealtimeReturn {
         case "response.audio_transcript.done":
         case "response.output_audio_transcript.done": {
           const finalText = event.transcript as string;
-          if (finalText && assistantEntryIdRef.current) {
-            const id = assistantEntryIdRef.current;
-            setTranscript((prev) =>
-              prev.map((e) =>
-                e.id === id ? { ...e, text: finalText } : e,
-              ),
-            );
+          if (finalText) {
+            lastAgentTextRef.current = finalText;
+            if (assistantEntryIdRef.current) {
+              const id = assistantEntryIdRef.current;
+              setTranscript((prev) =>
+                prev.map((e) =>
+                  e.id === id ? { ...e, text: finalText } : e,
+                ),
+              );
+            }
           }
           assistantBufferRef.current = "";
           assistantEntryIdRef.current = null;
           break;
         }
 
-        case "response.done":
+        case "response.done": {
+          // Finalize the transcript entry
+          if (assistantBufferRef.current && assistantEntryIdRef.current) {
+            lastAgentTextRef.current = assistantBufferRef.current;
+          }
           assistantBufferRef.current = "";
           assistantEntryIdRef.current = null;
           agentResponseCountRef.current += 1;
+          responseInProgressRef.current = false;
           setAgentState("listening");
+
+          // NOW unmute — the full response has been generated and audio
+          // buffers are flushing. Delay lets remaining audio play out.
+          if (!userMutedRef.current && session.muted === true) {
+            const isGreeting = agentResponseCountRef.current <= 1;
+            const unmuteDelay = isGreeting ? 3000 : 1500;
+            setTimeout(() => {
+              if (!userMutedRef.current && sessionRef.current) {
+                try { sessionRef.current.mute(false); } catch {}
+              }
+              if (wakeWordModeRef.current) {
+                startInactivityTimer();
+              }
+            }, unmuteDelay);
+          }
           break;
+        }
 
         case "error": {
           const err = event.error as Record<string, unknown>;

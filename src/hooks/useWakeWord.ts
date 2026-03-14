@@ -67,8 +67,8 @@ export function useWakeWord({ enabled, onDetected }: UseWakeWordOptions) {
       setState("listening");
 
       while (active) {
-        // Record a 3-second clip
-        const clip = await recordClip(stream, 3000);
+        // Record a 2-second clip — shorter = faster wake word response
+        const clip = await recordClip(stream, 2000);
         if (!active || !clip) break;
 
         // Convert to base64
@@ -110,7 +110,7 @@ export function useWakeWord({ enabled, onDetected }: UseWakeWordOptions) {
 
         if (active) setState("listening");
         // Brief pause before next recording
-        await sleep(200);
+        await sleep(100);
       }
     }
 
