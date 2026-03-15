@@ -151,9 +151,10 @@ export function useRealtime(): UseRealtimeReturn {
             },
             noiseReduction: { type: "far_field" },
             turnDetection: {
-              type: "semantic_vad",
-              eagerness: "low",
+              type: "server_vad",
+              threshold: 0.9,
               prefixPaddingMs: 300,
+              silenceDurationMs: 1200,
             },
           },
           output: {

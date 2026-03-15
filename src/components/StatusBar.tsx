@@ -9,7 +9,7 @@ export function StatusBar({ agentState, status, awaitingWake }: StatusBarProps) 
     return <Pill color="bg-cyan-500" pulse label="Connecting..." />;
   }
   if (awaitingWake) {
-    return <Pill color="bg-violet-500" pulse label='Say "Hey Samuel"' />;
+    return <Pill color="bg-violet-500" pulse label="Listening" />;
   }
   if (status === "disconnected") {
     return <Pill color="bg-slate-600" label="Offline" />;

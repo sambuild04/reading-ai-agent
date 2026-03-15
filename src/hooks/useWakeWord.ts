@@ -9,18 +9,15 @@ interface UseWakeWordOptions {
 }
 
 function containsWakeWord(text: string): boolean {
-  const lower = text.toLowerCase().trim();
+  const lower = text.toLowerCase().replace(/[.,!?'"]/g, "").trim();
   if (!lower) return false;
+  // Require "hey" (or common misheard variants) before "samuel"/"sam"
   return (
     lower.includes("hey samuel") ||
     lower.includes("hay samuel") ||
-    lower.includes("hey, samuel") ||
     lower.includes("hey samual") ||
     lower.includes("hey samuell") ||
-    lower.includes("a samuel") ||
-    lower.includes("hey, sam") ||
-    (lower.includes("samuel") && lower.length < 40) ||
-    (lower.includes("hey sam") && !lower.includes("same") && lower.length < 30)
+    (lower.includes("hey sam") && !lower.includes("same"))
   );
 }
 
