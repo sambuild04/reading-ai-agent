@@ -3,8 +3,39 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 
 static DEFAULT_DISPLAY: AtomicU32 = AtomicU32::new(1);
+
+// Holds the child process for the system audio recorder (Swift helper)
+static RECORDING_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
+
+const TEMP_FILES: &[&str] = &[
+    "/tmp/samuel-recording.m4a",
+    "/tmp/samuel-page.png",
+    "/tmp/samuel-page.jpg",
+    "/tmp/samuel-debug.jpg",
+    "/tmp/samuel-screen.png",
+    "/tmp/samuel-screen.jpg",
+    "/tmp/samuel-screen-debug.jpg",
+    "/tmp/samuel-cua-screen.png",
+    "/tmp/samuel-cua-resized.jpg",
+    "/tmp/samuel-cua-debug.jpg",
+    "/tmp/samuel-vision-req.json",
+    "/tmp/samuel-cua-req.json",
+    "/tmp/samuel-wake-audio.webm",
+    "/tmp/samuel-wake-audio.mp4",
+    "/tmp/samuel-wake-debug.webm",
+    "/tmp/samuel-wake-debug.mp4",
+];
+
+/// Remove leftover temp files from previous sessions.
+pub fn cleanup_temp_files() {
+    for path in TEMP_FILES {
+        let _ = fs::remove_file(path);
+    }
+    eprintln!("[cleanup] removed stale temp files");
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BookWindow {
@@ -1013,5 +1044,356 @@ pub fn read_config_internal() -> Result<Config, String> {
         provider: raw["provider"].as_str().map(String::from),
         model: raw["model"].as_str().map(String::from),
         delay_ms: raw["delayMs"].as_u64().or(Some(800)),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Recording — system audio capture + Whisper transcription + GPT-4o analysis
+// ---------------------------------------------------------------------------
+
+const RECORDING_PATH: &str = "/tmp/samuel-recording.m4a";
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ScriptLine {
+    pub timestamp: String,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct VocabEntry {
+    pub word: String,
+    pub reading: String,
+    pub meaning: String,
+    pub level: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GrammarPoint {
+    pub pattern: String,
+    pub explanation: String,
+    pub examples: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RecordingAnalysis {
+    pub transcript: Vec<ScriptLine>,
+    pub vocabulary: Vec<VocabEntry>,
+    pub grammar: Vec<GrammarPoint>,
+    pub summary: String,
+}
+
+fn find_record_helper() -> Result<String, String> {
+    // Look for the compiled binary next to the swift source
+    let candidates = [
+        // dev — relative to the tauri src-tauri dir
+        concat!(env!("CARGO_MANIFEST_DIR"), "/helpers/record-audio"),
+    ];
+    for p in &candidates {
+        if std::path::Path::new(p).exists() {
+            return Ok(p.to_string());
+        }
+    }
+    Err(
+        "record-audio helper not found. Compile it with: \
+         swiftc -o src-tauri/helpers/record-audio src-tauri/helpers/record-audio.swift \
+         -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia"
+            .to_string(),
+    )
+}
+
+#[tauri::command]
+pub async fn start_recording() -> Result<String, String> {
+    let helper = find_record_helper()?;
+
+    let mut guard = RECORDING_CHILD
+        .lock()
+        .map_err(|e| format!("lock error: {e}"))?;
+
+    if guard.is_some() {
+        return Err("Recording already in progress".to_string());
+    }
+
+    // Remove stale file
+    let _ = fs::remove_file(RECORDING_PATH);
+
+    let child = std::process::Command::new(&helper)
+        .arg(RECORDING_PATH)
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("Failed to start record-audio: {e}"))?;
+
+    eprintln!("[recording] started pid={}", child.id());
+    *guard = Some(child);
+
+    Ok("Recording started".to_string())
+}
+
+#[tauri::command]
+pub async fn stop_recording() -> Result<String, String> {
+    let mut guard = RECORDING_CHILD
+        .lock()
+        .map_err(|e| format!("lock error: {e}"))?;
+
+    let mut child = guard
+        .take()
+        .ok_or("No recording in progress")?;
+
+    // Send SIGTERM so the helper finalizes the file
+    #[cfg(unix)]
+    {
+        unsafe {
+            libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+        }
+    }
+
+    // Wait for clean exit (up to 5s)
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => break,
+            Ok(None) => {
+                if start.elapsed().as_secs() > 5 {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return Err(format!("wait error: {e}")),
+        }
+    }
+
+    eprintln!("[recording] stopped");
+
+    if !std::path::Path::new(RECORDING_PATH).exists() {
+        return Err("Recording file not found — capture may have failed".to_string());
+    }
+
+    let meta = fs::metadata(RECORDING_PATH)
+        .map_err(|e| format!("stat: {e}"))?;
+    eprintln!("[recording] file size: {:.1}KB", meta.len() as f64 / 1024.0);
+
+    Ok(RECORDING_PATH.to_string())
+}
+
+#[tauri::command]
+pub async fn analyze_recording() -> Result<RecordingAnalysis, String> {
+    let config = read_config_internal()?;
+    let api_key = config
+        .api_key
+        .ok_or("No API key configured")?;
+
+    if !std::path::Path::new(RECORDING_PATH).exists() {
+        return Err("No recording file found — record first".to_string());
+    }
+
+    eprintln!("[recording] transcribing with Whisper (ja)...");
+
+    // Step 1: Transcribe with Whisper, forced to Japanese, verbose JSON for timestamps
+    let whisper_output = Command::new("curl")
+        .args([
+            "-s",
+            "--max-time", "120",
+            "-X", "POST",
+            "https://api.openai.com/v1/audio/transcriptions",
+            "-H", &format!("Authorization: Bearer {api_key}"),
+            "-F", &format!("file=@{RECORDING_PATH}"),
+            "-F", "model=whisper-1",
+            "-F", "language=ja",
+            "-F", "response_format=verbose_json",
+        ])
+        .output()
+        .map_err(|e| format!("curl whisper: {e}"))?;
+
+    if !whisper_output.status.success() {
+        return Err(format!(
+            "Whisper API error: {}",
+            String::from_utf8_lossy(&whisper_output.stderr)
+        ));
+    }
+
+    let whisper_body: serde_json::Value = serde_json::from_slice(&whisper_output.stdout)
+        .map_err(|e| format!("parse whisper response: {e}"))?;
+
+    if let Some(err) = whisper_body.get("error") {
+        return Err(format!(
+            "Whisper API: {}",
+            err["message"].as_str().unwrap_or("unknown")
+        ));
+    }
+
+    let full_text = whisper_body["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    // Build transcript lines from segments
+    let mut transcript_lines: Vec<ScriptLine> = Vec::new();
+    if let Some(segments) = whisper_body["segments"].as_array() {
+        for seg in segments {
+            let start_secs = seg["start"].as_f64().unwrap_or(0.0);
+            let mins = (start_secs / 60.0).floor() as u32;
+            let secs = (start_secs % 60.0).floor() as u32;
+            transcript_lines.push(ScriptLine {
+                timestamp: format!("{mins}:{secs:02}"),
+                text: seg["text"].as_str().unwrap_or("").trim().to_string(),
+            });
+        }
+    }
+
+    if full_text.is_empty() {
+        return Ok(RecordingAnalysis {
+            transcript: transcript_lines,
+            vocabulary: vec![],
+            grammar: vec![],
+            summary: "No speech detected in the recording.".to_string(),
+        });
+    }
+
+    eprintln!(
+        "[recording] transcript: {} chars, {} segments — analyzing with GPT-4o...",
+        full_text.len(),
+        transcript_lines.len()
+    );
+
+    // Step 2: Analyze with GPT-4o
+    let analysis_prompt = format!(
+        r#"You are a Japanese language tutor. Analyze the following Japanese transcript from an anime/video clip. The audio may contain background music/SFX, so some parts may be noisy or unclear — do your best.
+
+Transcript:
+{full_text}
+
+Return a JSON object with exactly these fields:
+{{
+  "vocabulary": [
+    {{ "word": "漢字", "reading": "かんじ", "meaning": "kanji; Chinese characters", "level": "N4" }}
+  ],
+  "grammar": [
+    {{ "pattern": "〜てしまう", "explanation": "Indicates completion or regret. Casual form: 〜ちゃう", "examples": ["食べてしまった — I ended up eating it", "忘れちゃった — I accidentally forgot"] }}
+  ],
+  "summary": "Brief English summary of what was said (2-3 sentences)"
+}}
+
+Guidelines:
+- Include ALL meaningful vocabulary (not particles alone). Include common words too for beginners.
+- For vocabulary: word in kanji, reading in hiragana, English meaning, JLPT level estimate (N5-N1 or "—" if unsure).
+- For grammar: ONLY include grammar patterns that actually appear in the transcript above. Do NOT add grammar points that are not used in the clip. For each pattern, quote the exact phrase from the transcript where it appears, explain it simply, and give 1 example sentence.
+- Summary should explain the scene/conversation briefly in English.
+- Return ONLY valid JSON, no markdown fences."#
+    );
+
+    let gpt_payload = serde_json::json!({
+        "model": "gpt-4o",
+        "messages": [
+            { "role": "user", "content": analysis_prompt }
+        ],
+        "temperature": 0.3,
+        "max_tokens": 4000
+    });
+
+    let gpt_output = Command::new("curl")
+        .args([
+            "-s",
+            "--max-time", "60",
+            "-X", "POST",
+            "https://api.openai.com/v1/chat/completions",
+            "-H", &format!("Authorization: Bearer {api_key}"),
+            "-H", "Content-Type: application/json",
+            "-d", &gpt_payload.to_string(),
+        ])
+        .output()
+        .map_err(|e| format!("curl gpt: {e}"))?;
+
+    if !gpt_output.status.success() {
+        return Err(format!(
+            "GPT API error: {}",
+            String::from_utf8_lossy(&gpt_output.stderr)
+        ));
+    }
+
+    let gpt_body: serde_json::Value = serde_json::from_slice(&gpt_output.stdout)
+        .map_err(|e| format!("parse GPT response: {e}"))?;
+
+    if let Some(err) = gpt_body.get("error") {
+        return Err(format!(
+            "GPT API: {}",
+            err["message"].as_str().unwrap_or("unknown")
+        ));
+    }
+
+    let content = gpt_body["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("{}");
+
+    // Strip potential markdown code fences
+    let cleaned = content
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    let analysis: serde_json::Value = serde_json::from_str(cleaned).unwrap_or_else(|_| {
+        serde_json::json!({
+            "vocabulary": [],
+            "grammar": [],
+            "summary": content
+        })
+    });
+
+    let vocabulary: Vec<VocabEntry> = analysis["vocabulary"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    Some(VocabEntry {
+                        word: v["word"].as_str()?.to_string(),
+                        reading: v["reading"].as_str().unwrap_or("").to_string(),
+                        meaning: v["meaning"].as_str().unwrap_or("").to_string(),
+                        level: v["level"].as_str().unwrap_or("—").to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let grammar: Vec<GrammarPoint> = analysis["grammar"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|g| {
+                    Some(GrammarPoint {
+                        pattern: g["pattern"].as_str()?.to_string(),
+                        explanation: g["explanation"].as_str().unwrap_or("").to_string(),
+                        examples: g["examples"]
+                            .as_array()
+                            .map(|e| {
+                                e.iter()
+                                    .filter_map(|s| s.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let summary = analysis["summary"]
+        .as_str()
+        .unwrap_or("Analysis complete.")
+        .to_string();
+
+    eprintln!(
+        "[recording] analysis done: {} vocab, {} grammar points",
+        vocabulary.len(),
+        grammar.len()
+    );
+
+    Ok(RecordingAnalysis {
+        transcript: transcript_lines,
+        vocabulary,
+        grammar,
+        summary,
     })
 }

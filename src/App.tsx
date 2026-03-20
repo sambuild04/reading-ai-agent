@@ -1,6 +1,7 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRealtime } from "./hooks/useRealtime";
 import { useWakeWord } from "./hooks/useWakeWord";
+import { useRecordMode } from "./hooks/useRecordMode";
 import { playChime, playSleep } from "./lib/sounds";
 import { StatusBar } from "./components/StatusBar";
 import { Character } from "./components/Character";
@@ -17,9 +18,18 @@ export default function App() {
     mute,
     isMuted,
     setWakeWordMode,
+    setSuppressIdle,
   } = useRealtime();
 
+  const record = useRecordMode();
   const [awaitingWake, setAwaitingWake] = useState(true);
+
+  // Keep the session alive during recording and while viewing results
+  // so the user can have a conversation about the clip
+  useEffect(() => {
+    const active = record.recordingState !== "idle";
+    setSuppressIdle(active);
+  }, [record.recordingState, setSuppressIdle]);
   const connectingRef = useRef(false);
   // Tracks when the session became active — idle detection won't fire for the
   // first 15 s so the greeting can finish and the user has time to speak.
@@ -55,7 +65,8 @@ export default function App() {
     prevAgentState.current !== "idle" &&
     status === "connected" &&
     !awaitingWake &&
-    sessionAge > 15_000
+    sessionAge > 15_000 &&
+    record.recordingState === "idle"
   ) {
     playSleep();
     mute(true);
@@ -83,27 +94,55 @@ export default function App() {
           status={status}
           awaitingWake={awaitingWake}
         />
-        {status === "connected" && !awaitingWake && (
-          <div className="flex items-center gap-2">
-            <ScreenPicker />
+        <div className="flex items-center gap-2">
+          {/* Stop/processing button always visible while recording, even in wake mode */}
+          {record.recordingState === "recording" && (
             <button
-              onClick={() => mute(!isMuted)}
-              className={`rounded-full p-2 transition-colors ${
-                isMuted
-                  ? "bg-red-900/50 text-red-300"
-                  : "bg-white/10 text-slate-400 hover:text-slate-200"
-              }`}
+              onClick={record.stopRecording}
+              className="record-btn-active rounded-full p-2 text-red-300 transition-colors"
+              title={`Recording... ${formatTime(record.elapsed)}`}
             >
-              {isMuted ? <MicOffIcon /> : <MicIcon />}
+              <StopIcon />
             </button>
-            <button
-              onClick={handleDisconnect}
-              className="rounded-full bg-red-600/70 p-2 text-white hover:bg-red-600/90 transition-colors"
-            >
-              <PhoneOffIcon />
-            </button>
-          </div>
-        )}
+          )}
+          {record.recordingState === "processing" && (
+            <div className="rounded-full p-2 bg-white/10 text-amber-300 animate-pulse" title="Processing...">
+              <ProcessingIcon />
+            </div>
+          )}
+
+          {/* Full controls only when connected and active */}
+          {status === "connected" && !awaitingWake && (
+            <>
+              <ScreenPicker />
+              {(record.recordingState === "idle" || record.recordingState === "results") && (
+                <button
+                  onClick={record.startRecording}
+                  className="rounded-full p-2 bg-white/10 text-slate-400 hover:text-red-400 transition-colors"
+                  title="Record system audio"
+                >
+                  <RecordIcon />
+                </button>
+              )}
+              <button
+                onClick={() => mute(!isMuted)}
+                className={`rounded-full p-2 transition-colors ${
+                  isMuted
+                    ? "bg-red-900/50 text-red-300"
+                    : "bg-white/10 text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {isMuted ? <MicOffIcon /> : <MicIcon />}
+              </button>
+              <button
+                onClick={handleDisconnect}
+                className="rounded-full bg-red-600/70 p-2 text-white hover:bg-red-600/90 transition-colors"
+              >
+                <PhoneOffIcon />
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Character stage — takes up the full area */}
@@ -112,6 +151,15 @@ export default function App() {
         transcript={transcript}
         awaitingWake={awaitingWake}
         screenTarget={screenTarget}
+        recordingState={record.recordingState}
+        recordingElapsed={record.elapsed}
+        analysis={record.analysis}
+        panelOpen={record.panelOpen}
+        analysisStage={record.analysisStage}
+        analysisElapsed={record.analysisElapsed}
+        onDismissAnalysis={record.dismiss}
+        onTogglePanel={record.togglePanel}
+        onClearAnalysis={record.clearAnalysis}
       />
     </div>
   );
@@ -136,6 +184,37 @@ function MicOffIcon() {
       <path d="M15 9.34V5a3 3 0 0 0-5.94-.6" />
       <path d="M9 9v3a3 3 0 0 0 5.12 2.12" />
       <line x1="12" x2="12" y1="19" y2="22" />
+    </svg>
+  );
+}
+
+function formatTime(secs: number): string {
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function RecordIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+      <circle cx="12" cy="12" r="8" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+      <rect x="6" y="6" width="12" height="12" rx="2" />
+    </svg>
+  );
+}
+
+function ProcessingIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 2v4" /><path d="M12 18v4" /><path d="m4.93 4.93 2.83 2.83" /><path d="m16.24 16.24 2.83 2.83" />
+      <path d="M2 12h4" /><path d="M18 12h4" /><path d="m4.93 19.07 2.83-2.83" /><path d="m16.24 7.76 2.83-2.83" />
     </svg>
   );
 }

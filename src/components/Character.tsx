@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useRive, useStateMachineInput } from "@rive-app/react-canvas";
 import type { TranscriptEntry } from "../hooks/useRealtime";
+import type { AnalysisStage, RecordingAnalysis, RecordingState } from "../hooks/useRecordMode";
 
 type AgentState = "idle" | "listening" | "thinking" | "speaking";
 
@@ -9,11 +10,40 @@ interface CharacterProps {
   transcript: TranscriptEntry[];
   awaitingWake: boolean;
   screenTarget: string | null;
+  recordingState: RecordingState;
+  recordingElapsed: number;
+  analysis: RecordingAnalysis | null;
+  panelOpen: boolean;
+  analysisStage: AnalysisStage | null;
+  analysisElapsed: number;
+  onDismissAnalysis: () => void;
+  onTogglePanel: () => void;
+  onClearAnalysis: () => void;
 }
 
 const STATE_MACHINE = "State Machine 1";
 
-export function Character({ agentState, transcript, awaitingWake, screenTarget }: CharacterProps) {
+function formatTime(secs: number): string {
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+export function Character({
+  agentState,
+  transcript,
+  awaitingWake,
+  screenTarget,
+  recordingState,
+  recordingElapsed,
+  analysis,
+  panelOpen,
+  analysisStage,
+  analysisElapsed,
+  onDismissAnalysis,
+  onTogglePanel,
+  onClearAnalysis,
+}: CharacterProps) {
   const { rive, RiveComponent } = useRive({
     src: "/character.riv",
     stateMachines: STATE_MACHINE,
@@ -47,6 +77,44 @@ export function Character({ agentState, transcript, awaitingWake, screenTarget }
 
   return (
     <div className="character-stage" data-tauri-drag-region>
+      {/* Recording indicator */}
+      {recordingState === "recording" && (
+        <div className="recording-badge">
+          <div className="recording-dot" />
+          REC {formatTime(recordingElapsed)}
+        </div>
+      )}
+      {recordingState === "processing" && analysisStage && (
+        <div className="analysis-progress-bar">
+          <div className="analysis-progress-stages">
+            <AnalysisStageIndicator
+              label="Transcribing"
+              active={analysisStage === "transcribing"}
+              done={analysisStage === "analyzing" || analysisStage === "done"}
+            />
+            <div className="analysis-progress-divider" />
+            <AnalysisStageIndicator
+              label="Analyzing"
+              active={analysisStage === "analyzing"}
+              done={analysisStage === "done"}
+            />
+          </div>
+          <div className="analysis-progress-track">
+            <div
+              className="analysis-progress-fill"
+              style={{
+                width: analysisStage === "done"
+                  ? "100%"
+                  : analysisStage === "analyzing"
+                    ? `${Math.min(50 + analysisElapsed * 1.5, 95)}%`
+                    : `${Math.min(analysisElapsed * 3, 48)}%`,
+              }}
+            />
+          </div>
+          <div className="analysis-progress-time">{formatTime(analysisElapsed)}</div>
+        </div>
+      )}
+
       {/* Samuel's speech bubble — top right of character */}
       {(latestAssistant || showThinking) && (
         <div className="speech-bubble speech-bubble-samuel">
@@ -102,7 +170,98 @@ export function Character({ agentState, transcript, awaitingWake, screenTarget }
           </div>
         </div>
       )}
+
+      {/* Minimized analysis badge — tap to re-open */}
+      {analysis && !panelOpen && (
+        <button onClick={onTogglePanel} className="analysis-reopen-badge">
+          <BookIcon /> View Breakdown
+        </button>
+      )}
+
+      {/* Analysis overlay panel — coexists with chat */}
+      {analysis && panelOpen && (
+        <div className="analysis-overlay">
+          <div className="analysis-bubble">
+            <div className="analysis-header">
+              <span className="analysis-title">Language Breakdown</span>
+              <div className="flex items-center gap-2">
+                <button onClick={onDismissAnalysis} className="analysis-minimize" title="Minimize">
+                  &minus;
+                </button>
+                <button onClick={onClearAnalysis} className="analysis-close" title="Close">
+                  &times;
+                </button>
+              </div>
+            </div>
+
+            <div className="analysis-section">
+              <h3 className="analysis-section-title">Summary</h3>
+              <p className="analysis-summary">{analysis.summary}</p>
+            </div>
+
+            {analysis.transcript.length > 0 && (
+              <div className="analysis-section">
+                <h3 className="analysis-section-title">Script</h3>
+                <div className="script-lines">
+                  {analysis.transcript.map((line, i) => (
+                    <div key={i} className="script-line">
+                      <span className="script-timestamp">{line.timestamp}</span>
+                      <span className="script-text">{line.text}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {analysis.vocabulary.length > 0 && (
+              <div className="analysis-section">
+                <h3 className="analysis-section-title">Vocabulary</h3>
+                <div className="vocab-table">
+                  <div className="vocab-header">
+                    <span>Word</span><span>Reading</span><span>Meaning</span><span>Level</span>
+                  </div>
+                  {analysis.vocabulary.map((v, i) => (
+                    <div key={i} className="vocab-row">
+                      <span className="vocab-word">{v.word}</span>
+                      <span className="vocab-reading">{v.reading}</span>
+                      <span className="vocab-meaning">{v.meaning}</span>
+                      <span className="vocab-level">{v.level}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {analysis.grammar.length > 0 && (
+              <div className="analysis-section">
+                <h3 className="analysis-section-title">Grammar Points</h3>
+                {analysis.grammar.map((g, i) => (
+                  <div key={i} className="grammar-card">
+                    <div className="grammar-pattern">{g.pattern}</div>
+                    <div className="grammar-explanation">{g.explanation}</div>
+                    {g.examples.length > 0 && (
+                      <ul className="grammar-examples">
+                        {g.examples.map((ex, j) => (
+                          <li key={j}>{ex}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+function BookIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20" />
+    </svg>
   );
 }
 
@@ -112,5 +271,30 @@ function EyeIcon() {
       <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
       <circle cx="12" cy="12" r="3" />
     </svg>
+  );
+}
+
+function AnalysisStageIndicator({
+  label,
+  active,
+  done,
+}: {
+  label: string;
+  active: boolean;
+  done: boolean;
+}) {
+  return (
+    <div className={`analysis-stage ${active ? "analysis-stage-active" : ""} ${done ? "analysis-stage-done" : ""}`}>
+      <div className="analysis-stage-dot">
+        {done ? (
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="20 6 9 17 4 12" />
+          </svg>
+        ) : active ? (
+          <div className="analysis-stage-pulse" />
+        ) : null}
+      </div>
+      <span className="analysis-stage-label">{label}</span>
+    </div>
   );
 }

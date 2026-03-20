@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { RealtimeSession } from "@openai/agents/realtime";
 import { samuelAgent } from "../lib/samuel";
-import { registerSendImage, registerScreenTarget } from "../lib/session-bridge";
+import { registerSendImage, registerSendText, registerScreenTarget } from "../lib/session-bridge";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 
@@ -23,6 +23,7 @@ export interface UseRealtimeReturn {
   mute: (muted: boolean) => void;
   isMuted: boolean;
   setWakeWordMode: (on: boolean) => void;
+  setSuppressIdle: (suppress: boolean) => void;
 }
 
 // Common hallucinations the transcriber produces from speaker echo / room reverb.
@@ -116,6 +117,7 @@ export function useRealtime(): UseRealtimeReturn {
   // inactivity timer. If user speaks within the window, keep going. If not,
   // mute mic and set agentState to "idle" (signals wake word should re-enable).
   const wakeWordModeRef = useRef(false);
+  const suppressIdleRef = useRef(false);
   const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearInactivityTimer = () => {
@@ -131,6 +133,7 @@ export function useRealtime(): UseRealtimeReturn {
     const isFirstExchange = agentResponseCountRef.current <= 1;
     const timeout = isFirstExchange ? 15_000 : 6_000;
     inactivityTimerRef.current = setTimeout(() => {
+      if (suppressIdleRef.current) return;
       if (wakeWordModeRef.current && sessionRef.current) {
         try { sessionRef.current.mute(true); } catch {}
         setIsMuted(true);
@@ -364,6 +367,19 @@ export function useRealtime(): UseRealtimeReturn {
       screenTargetTimerRef.current = setTimeout(() => setScreenTarget(null), 3000);
     });
 
+    // Register text bridge so UI actions can prompt Samuel to speak
+    registerSendText((text: string) => {
+      session.transport.sendEvent({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text }],
+        },
+      });
+      session.transport.sendEvent({ type: "response.create" });
+    });
+
     // Register the image bridge so tools can inject screenshots
     registerSendImage((base64Jpeg: string) => {
       session.transport.sendEvent({
@@ -383,6 +399,7 @@ export function useRealtime(): UseRealtimeReturn {
 
     return () => {
       registerSendImage(null);
+      registerSendText(null);
       registerScreenTarget(null);
       session.close();
       sessionRef.current = null;
@@ -447,6 +464,10 @@ export function useRealtime(): UseRealtimeReturn {
     if (!on) clearInactivityTimer();
   }, []);
 
+  const setSuppressIdle = useCallback((suppress: boolean) => {
+    suppressIdleRef.current = suppress;
+  }, []);
+
   return {
     status,
     transcript,
@@ -457,5 +478,6 @@ export function useRealtime(): UseRealtimeReturn {
     mute,
     isMuted,
     setWakeWordMode,
+    setSuppressIdle,
   };
 }

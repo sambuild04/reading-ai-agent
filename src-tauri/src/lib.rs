@@ -10,6 +10,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
+            commands::cleanup_temp_files();
+
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -53,6 +55,9 @@ pub fn run() {
             transcribe_audio,
             list_displays,
             set_default_display,
+            start_recording,
+            stop_recording,
+            analyze_recording,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

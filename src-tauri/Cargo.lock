@@ -2992,6 +2992,7 @@ dependencies = [
  "base64 0.22.1",
  "cocoa",
  "dirs",
+ "libc",
  "log",
  "objc",
  "serde",

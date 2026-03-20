@@ -1,7 +1,7 @@
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import { z } from "zod";
 import { invoke } from "@tauri-apps/api/core";
-import { sendImageToSession, notifyScreenTarget } from "./session-bridge";
+import { sendImageToSession, notifyScreenTarget, notifyRecordingAction } from "./session-bridge";
 
 interface CaptureResult {
   base64: string;
@@ -253,6 +253,56 @@ const pronounceTool = tool({
 });
 
 // ---------------------------------------------------------------------------
+// Recording Mode Tools (system audio capture for language learning)
+// ---------------------------------------------------------------------------
+
+const startRecordingTool = tool({
+  name: "start_recording",
+  description:
+    "Start recording system audio from the user's computer. " +
+    "Use this when the user says 'start recording', 'record this', or asks you to listen to anime/video audio. " +
+    "This captures system audio (not microphone) so it records whatever is playing on the computer.",
+  parameters: z.object({}),
+  async execute() {
+    notifyRecordingAction("start");
+    try {
+      await invoke("start_recording");
+      return "Recording started. System audio is now being captured. Tell the user to play their anime/video and say 'stop recording' when they're done.";
+    } catch (e) {
+      notifyRecordingAction("error", String(e));
+      return `Failed to start recording: ${e}`;
+    }
+  },
+});
+
+const stopRecordingTool = tool({
+  name: "stop_recording",
+  description:
+    "Stop the current system audio recording. Analysis will run in the background. " +
+    "Use when the user says 'stop recording', 'stop', or 'that's enough'. " +
+    "This returns immediately — you can keep chatting. " +
+    "When analysis is done, you'll be notified automatically.",
+  parameters: z.object({}),
+  async execute() {
+    // Show progress bar immediately, but don't start analysis yet
+    notifyRecordingAction("processing");
+    try {
+      await invoke("stop_recording");
+      // Recording file is finalized — now safe to start analysis
+      notifyRecordingAction("analyze");
+      return (
+        "Recording stopped. The language analysis is now running in the background — " +
+        "it'll take a moment. Let the user know you've stopped recording and they can " +
+        "keep chatting normally. When the analysis is ready, you'll get a system notification."
+      );
+    } catch (e) {
+      notifyRecordingAction("error", String(e));
+      return `Failed to stop recording: ${e}`;
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Agent configuration
 // ---------------------------------------------------------------------------
 
@@ -275,6 +325,10 @@ You are a reading and language learning assistant. You have two sets of tools:
 - translate_screen: Captures screen and you translate all visible foreign text. Use when user says "translate this", "what does this say", etc.
 - explain_grammar: Captures screen and you break down the grammar of visible foreign text. Use when user asks about grammar, particles, conjugation, sentence structure.
 - pronounce: You speak a word/phrase in the correct language with proper pronunciation. Use when user says "how do you say...", "pronounce...", "say this word".
+
+### Recording Mode (system audio capture)
+- start_recording: Captures system audio (what's playing on the computer — anime, video, etc). Use when the user says "start recording", "record this", "listen to this".
+- stop_recording: Stops recording immediately. Analysis runs in the BACKGROUND — you can keep chatting normally with the user. When the analysis finishes, you'll get a system notification with the results and can casually mention it.
 
 ### Multi-monitor awareness
 The user has multiple monitors. If they mention a specific app ("look at my Chrome", "translate what's in Safari", "check my browser"), ALWAYS pass that app's name as the app_name parameter to view_screen / translate_screen / explain_grammar. This ensures we capture the right window, even if it is on a different display. If they just say "look at my screen" without specifying an app, leave app_name empty — it will use their chosen default display.
@@ -323,6 +377,12 @@ Moderate. Unhurried but not slow. Brisk when confirming actions.
 - Adapt to whatever language the user is studying — detect it from the screen content.
 - If the user highlights or points out specific text, focus your translation/explanation on that.
 
+# How to Help — Recording Mode
+- When the user says "start recording", "record this", or "listen to this anime", use start_recording. Briefly confirm and keep chatting normally.
+- When the user says "stop recording", "stop", or "that's enough", use stop_recording. It returns immediately. Say something like "Got it, I've stopped recording. The analysis is running — I'll let you know when it's ready." Then continue the conversation normally.
+- When you receive a [System: A language analysis just completed...] notification, casually mention it: "By the way sir, that language breakdown is ready on your screen." Then mention 1-2 highlights. Don't interrupt an ongoing topic abruptly.
+- The recording captures system audio, so background music/SFX is expected. Whisper handles this well with Japanese language mode.
+
 # General
 - Keep spoken summaries concise but thorough.
 - Never break character. You are Samuel.`;
@@ -340,5 +400,7 @@ export const samuelAgent = new RealtimeAgent({
     translateScreenTool,
     explainGrammarTool,
     pronounceTool,
+    startRecordingTool,
+    stopRecordingTool,
   ],
 });
