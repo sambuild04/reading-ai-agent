@@ -2,19 +2,30 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { registerLearningLanguage, sendTextAndRespond } from "../lib/session-bridge";
 import type { ConnectionStatus } from "./useRealtime";
+import type { Suggestion } from "../components/PassiveSuggestion";
 
 const STORAGE_KEY = "samuel-learning-language";
-const MIN_INTERVAL_MS = 30_000; // minimum 30s between checks
-const MAX_INTERVAL_MS = 90_000; // maximum 90s between checks
+const MIN_INTERVAL_MS = 30_000;
+const MAX_INTERVAL_MS = 90_000;
+const MIN_PROACTIVE_GAP_MS = 60_000;
 
 function randomInterval(): number {
   return MIN_INTERVAL_MS + Math.random() * (MAX_INTERVAL_MS - MIN_INTERVAL_MS);
+}
+
+interface TriageDecision {
+  classification: string;
+  confidence: number;
+  message: string;
 }
 
 export interface UseLearningModeReturn {
   learningLanguage: string | null;
   learningActive: boolean;
   clearLearning: () => void;
+  passiveSuggestion: Suggestion | null;
+  dismissSuggestion: () => void;
+  elaborateSuggestion: () => void;
 }
 
 export function useLearningMode(sessionStatus: ConnectionStatus): UseLearningModeReturn {
@@ -22,10 +33,11 @@ export function useLearningMode(sessionStatus: ConnectionStatus): UseLearningMod
     () => localStorage.getItem(STORAGE_KEY) || null,
   );
   const [active, setActive] = useState(false);
+  const [passiveSuggestion, setPassiveSuggestion] = useState<Suggestion | null>(null);
   const checkInFlightRef = useRef(false);
-  const checkCountRef = useRef(0); // alternates: even = screen, odd = audio
+  const checkCountRef = useRef(0);
+  const lastProactiveRef = useRef(0);
 
-  // Persist and expose language changes from Samuel's tool
   const updateLanguage = useCallback((lang: string | null) => {
     setLanguage(lang);
     if (lang) {
@@ -39,13 +51,38 @@ export function useLearningMode(sessionStatus: ConnectionStatus): UseLearningMod
     updateLanguage(null);
   }, [updateLanguage]);
 
-  // Register bridge callback so Samuel's set_learning_language tool works
+  const dismissSuggestion = useCallback(() => {
+    setPassiveSuggestion(null);
+  }, []);
+
+  const elaborateSuggestion = useCallback(() => {
+    const s = passiveSuggestion;
+    setPassiveSuggestion(null);
+    if (s) {
+      sendTextAndRespond(
+        `[System: The user wants to know more about this: ${s.text}. Explain in detail.]`,
+      );
+    }
+  }, [passiveSuggestion]);
+
   useEffect(() => {
     registerLearningLanguage(updateLanguage);
     return () => registerLearningLanguage(null);
   }, [updateLanguage]);
 
-  // Periodic screen check when learning mode is active and session is connected
+  // Start/stop persistent audio recorder when learning mode changes
+  useEffect(() => {
+    if (language && sessionStatus === "connected") {
+      invoke("start_learning_audio").catch((e) =>
+        console.warn("[learning-mode] failed to start audio:", e),
+      );
+    }
+    return () => {
+      invoke("stop_learning_audio").catch(() => {});
+    };
+  }, [language, sessionStatus]);
+
+  // Main observation loop
   useEffect(() => {
     if (!language || sessionStatus !== "connected") {
       setActive(false);
@@ -57,30 +94,62 @@ export function useLearningMode(sessionStatus: ConnectionStatus): UseLearningMod
     const check = async () => {
       if (checkInFlightRef.current) return;
       checkInFlightRef.current = true;
-      const isAudioTurn = checkCountRef.current % 2 === 1;
-      checkCountRef.current += 1;
+
       try {
-        let hints: string | null = null;
-        if (isAudioTurn) {
-          hints = await invoke<string | null>("check_audio_for_language", {
-            language,
-            durationSecs: 8,
-          });
-          if (hints) {
-            sendTextAndRespond(
-              `[System: Learning mode — overheard ${language} audio nearby. ` +
-              `Briefly and naturally mention this to the user (1-2 sentences): ${hints}]`,
-            );
-          }
-        } else {
-          hints = await invoke<string | null>("check_screen_for_language", { language });
-          if (hints) {
-            sendTextAndRespond(
-              `[System: Learning mode — spotted ${language} on the user's screen. ` +
-              `Briefly and naturally mention this to the user (1-2 sentences): ${hints}]`,
-            );
-          }
+        // Attention gate — skip if user is in deep focus
+        const attention = await invoke<string>("get_attention_state");
+        if (attention === "focused") {
+          return;
         }
+
+        // Enforce minimum gap between proactive actions
+        const now = Date.now();
+        if (now - lastProactiveRef.current < MIN_PROACTIVE_GAP_MS) {
+          return;
+        }
+
+        const isAudioTurn = checkCountRef.current % 2 === 1;
+        checkCountRef.current += 1;
+
+        // Gather observation
+        let rawHint: string | null = null;
+        let source: string;
+
+        if (isAudioTurn) {
+          rawHint = await invoke<string | null>("check_learning_audio", { language });
+          source = "audio";
+        } else {
+          rawHint = await invoke<string | null>("check_screen_for_language", { language });
+          source = "screen";
+        }
+
+        if (!rawHint) return;
+
+        // Triage — decide ignore / notify / act
+        const decision = await invoke<TriageDecision>("triage_observation", {
+          observation: rawHint,
+          source,
+          language,
+        });
+
+        if (decision.classification === "act" && decision.confidence > 0.65) {
+          lastProactiveRef.current = Date.now();
+          const prefix =
+            source === "audio"
+              ? `[System: Learning mode — overheard ${language} audio nearby.`
+              : `[System: Learning mode — spotted ${language} on the user's screen.`;
+          sendTextAndRespond(
+            `${prefix} Briefly and naturally mention this to the user (1-2 sentences): ${decision.message}]`,
+          );
+        } else if (decision.classification === "notify" && decision.confidence > 0.5) {
+          lastProactiveRef.current = Date.now();
+          setPassiveSuggestion({
+            text: decision.message,
+            source,
+            confidence: decision.confidence,
+          });
+        }
+        // "ignore" — do nothing
       } catch (e) {
         console.error("[learning-mode] check error:", e);
       } finally {
@@ -100,7 +169,6 @@ export function useLearningMode(sessionStatus: ConnectionStatus): UseLearningMod
       }, delay);
     };
 
-    // First check after a short stabilization delay, then random intervals
     timer = setTimeout(async () => {
       await check();
       scheduleNext();
@@ -113,5 +181,12 @@ export function useLearningMode(sessionStatus: ConnectionStatus): UseLearningMod
     };
   }, [language, sessionStatus]);
 
-  return { learningLanguage: language, learningActive: active, clearLearning };
+  return {
+    learningLanguage: language,
+    learningActive: active,
+    clearLearning,
+    passiveSuggestion,
+    dismissSuggestion,
+    elaborateSuggestion,
+  };
 }

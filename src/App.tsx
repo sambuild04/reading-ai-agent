@@ -7,6 +7,7 @@ import { playChime, playSleep } from "./lib/sounds";
 import { StatusBar } from "./components/StatusBar";
 import { Character } from "./components/Character";
 import { ScreenPicker } from "./components/ScreenPicker";
+import { PassiveSuggestion } from "./components/PassiveSuggestion";
 
 export default function App() {
   const {
@@ -164,6 +165,12 @@ export default function App() {
         onClearAnalysis={record.clearAnalysis}
         learningLanguage={learning.learningLanguage}
         learningActive={learning.learningActive}
+      />
+
+      <PassiveSuggestion
+        suggestion={learning.passiveSuggestion}
+        onDismiss={learning.dismissSuggestion}
+        onElaborate={learning.elaborateSuggestion}
       />
     </div>
   );

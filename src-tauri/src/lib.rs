@@ -1,7 +1,9 @@
 mod commands;
+mod memory;
 mod wake_word;
 
 use commands::*;
+use memory::*;
 use wake_word::*;
 use tauri::Manager;
 
@@ -60,6 +62,13 @@ pub fn run() {
             analyze_recording,
             check_screen_for_language,
             check_audio_for_language,
+            get_attention_state,
+            triage_observation,
+            start_learning_audio,
+            stop_learning_audio,
+            check_learning_audio,
+            memory_get_context,
+            memory_set_fact,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,14 +1,38 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::time::Instant;
+
+use crate::memory;
 
 static DEFAULT_DISPLAY: AtomicU32 = AtomicU32::new(1);
 
 // Holds the child process for the system audio recorder (Swift helper)
 static RECORDING_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
+
+// Persistent audio recorder for learning mode (separate from manual recording)
+static LEARNING_AUDIO_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
+const LEARNING_AUDIO_PATH: &str = "/tmp/samuel-learning-audio.m4a";
+
+// Screen change detection state
+struct ScreenState {
+    last_hash: u64,
+    last_app: String,
+    last_analysis: Instant,
+}
+static SCREEN_STATE: Mutex<Option<ScreenState>> = Mutex::new(None);
+
+// Apps where Samuel stays silent (deep focus)
+const FOCUS_APPS: &[&str] = &[
+    "Cursor", "Code", "Xcode", "Terminal", "iTerm2",
+    "Notion", "Obsidian", "Pages", "Word", "Alacritty",
+    "kitty", "Warp", "IntelliJ", "PyCharm", "WebStorm",
+];
 
 const TEMP_FILES: &[&str] = &[
     "/tmp/samuel-recording.m4a",
@@ -29,6 +53,7 @@ const TEMP_FILES: &[&str] = &[
     "/tmp/samuel-wake-debug.mp4",
     "/tmp/samuel-learning-req.json",
     "/tmp/samuel-learning-clip.m4a",
+    "/tmp/samuel-learning-audio.m4a",
 ];
 
 /// Remove leftover temp files from previous sessions.
@@ -1448,9 +1473,35 @@ Guidelines:
 // Learning Mode — periodic screen scan for target language content
 // ---------------------------------------------------------------------------
 
+/// Fast hash of byte data — samples every 64th byte for speed.
+fn hash_bytes(data: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for (i, &byte) in data.iter().enumerate() {
+        if i % 64 == 0 {
+            byte.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Get the frontmost application name via AppleScript.
+fn get_frontmost_app_name() -> String {
+    let output = Command::new("/usr/bin/osascript")
+        .args([
+            "-e",
+            r#"tell application "System Events" to get name of first application process whose frontmost is true"#,
+        ])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        }
+        _ => String::new(),
+    }
+}
+
 /// Capture the active window and ask GPT-4o Vision whether the target language
-/// is visible. Returns `Some(hints)` with a short voice-friendly summary of
-/// interesting vocabulary/grammar, or `None` if nothing relevant is found.
+/// is visible. Uses screen change detection to skip redundant API calls.
 #[tauri::command]
 pub async fn check_screen_for_language(language: String) -> Result<Option<String>, String> {
     let config = read_config_internal()?;
@@ -1463,6 +1514,31 @@ pub async fn check_screen_for_language(language: String) -> Result<Option<String
 
     if b64.len() < 100 {
         return Ok(None);
+    }
+
+    // Screen change detection: hash the screenshot, compare with last state
+    let current_hash = hash_bytes(b64.as_bytes());
+    let current_app = get_frontmost_app_name();
+    {
+        let mut state = SCREEN_STATE.lock().unwrap();
+        if let Some(ref prev) = *state {
+            let same_hash = prev.last_hash == current_hash;
+            let same_app = prev.last_app == current_app;
+            let recent = prev.last_analysis.elapsed().as_secs() < 90;
+            if same_hash && same_app && recent {
+                eprintln!(
+                    "[learning-mode] screen unchanged (app={}, {}s ago), skipping GPT-4o",
+                    current_app,
+                    prev.last_analysis.elapsed().as_secs()
+                );
+                return Ok(None);
+            }
+        }
+        *state = Some(ScreenState {
+            last_hash: current_hash,
+            last_app: current_app.clone(),
+            last_analysis: Instant::now(),
+        });
     }
 
     let prompt = format!(
@@ -1718,6 +1794,350 @@ pub async fn check_audio_for_language(language: String, duration_secs: Option<u6
         .to_string();
 
     eprintln!("[learning-mode] audio analysis: {}", &hint[..hint.len().min(100)]);
+
+    if hint == "NONE" || hint.to_uppercase().starts_with("NONE") {
+        Ok(None)
+    } else {
+        Ok(Some(hint))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Autonomy — attention state, triage router, persistent audio monitor
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TriageDecision {
+    pub classification: String,
+    pub confidence: f64,
+    pub message: String,
+}
+
+/// Detect whether the user is in deep focus, casually available, or idle.
+#[tauri::command]
+pub async fn get_attention_state() -> Result<String, String> {
+    let app = get_frontmost_app_name();
+    if app.is_empty() {
+        return Ok("available".to_string());
+    }
+    for focus_app in FOCUS_APPS {
+        if app.eq_ignore_ascii_case(focus_app) || app.contains(focus_app) {
+            return Ok("focused".to_string());
+        }
+    }
+    Ok("available".to_string())
+}
+
+/// Three-way triage: classify an observation as ignore / notify / act.
+/// Uses gpt-4o-mini for speed and low cost (~$0.0003 per call).
+#[tauri::command]
+pub async fn triage_observation(
+    observation: String,
+    source: String,
+    language: String,
+) -> Result<TriageDecision, String> {
+    let config = read_config_internal()?;
+    let api_key = config.api_key.ok_or("No API key")?;
+
+    let memory_context = memory::get_context();
+    let attention = get_frontmost_app_name();
+
+    // Record this observation in memory
+    let summary = format!("[{source}] {}", &observation[..observation.len().min(80)]);
+    memory::record_observation(&summary);
+
+    let prompt = format!(
+        r#"You are deciding whether Samuel, a proactive AI learning companion, should speak up.
+
+User is learning: {language}
+Current app: {attention}
+Memory context: {memory_context}
+Source: {source} (screen = visual, audio = overheard speech)
+
+Observation:
+{observation}
+
+Decide what to do. Return JSON ONLY:
+{{
+  "reasoning": "1-sentence step-by-step reasoning",
+  "classification": "ignore|notify|act",
+  "confidence": 0.0-1.0,
+  "message": "what Samuel should say if not ignore. null if ignore."
+}}
+
+Rules:
+- "ignore": Not useful. Background noise, already-taught vocabulary, generic content, not in {language}, or user already knows this.
+- "notify": Mildly interesting. A quick vocabulary reminder or common phrase. Show as subtle text card.
+- "act": Genuinely interesting and specific. A new word, unusual grammar pattern, or content directly relevant to the user's study. Worth speaking aloud.
+- Be conservative — silence (ignore) is better than interrupting needlessly.
+- If the observation mentions words listed in "Already taught", classify as ignore.
+- Only "act" for truly specific, helpful observations."#
+    );
+
+    let payload = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "messages": [
+            { "role": "user", "content": prompt }
+        ],
+        "max_tokens": 200,
+        "temperature": 0.2
+    });
+
+    let output = Command::new("curl")
+        .args([
+            "-s",
+            "--max-time", "10",
+            "-X", "POST",
+            "https://api.openai.com/v1/chat/completions",
+            "-H", &format!("Authorization: Bearer {api_key}"),
+            "-H", "Content-Type: application/json",
+            "-d", &payload.to_string(),
+        ])
+        .output()
+        .map_err(|e| format!("triage curl: {e}"))?;
+
+    if !output.status.success() {
+        return Ok(TriageDecision {
+            classification: "ignore".to_string(),
+            confidence: 0.0,
+            message: String::new(),
+        });
+    }
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap_or_default();
+
+    let content = body["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("{}");
+
+    let cleaned = content
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(cleaned).unwrap_or_default();
+
+    let classification = parsed["classification"]
+        .as_str()
+        .unwrap_or("ignore")
+        .to_string();
+    let confidence = parsed["confidence"].as_f64().unwrap_or(0.0);
+    let message = parsed["message"]
+        .as_str()
+        .unwrap_or(&observation)
+        .to_string();
+
+    eprintln!(
+        "[triage] {} (conf={:.2}): {}",
+        classification,
+        confidence,
+        &message[..message.len().min(80)]
+    );
+
+    // Record vocabulary if we're surfacing it
+    if classification != "ignore" {
+        let words: Vec<String> = message
+            .split_whitespace()
+            .filter(|w| w.chars().any(|c| !c.is_ascii()))
+            .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation()).to_string())
+            .filter(|w| !w.is_empty())
+            .collect();
+        if !words.is_empty() {
+            memory::record_vocabulary(&words);
+        }
+    }
+
+    Ok(TriageDecision {
+        classification,
+        confidence,
+        message,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Persistent audio monitor for learning mode
+// ---------------------------------------------------------------------------
+
+fn start_learning_audio_internal() -> Result<(), String> {
+    let helper = find_record_helper()?;
+    let mut guard = LEARNING_AUDIO_CHILD.lock().map_err(|e| format!("lock: {e}"))?;
+    if guard.is_some() {
+        return Ok(());
+    }
+    // Don't conflict with manual recording
+    let is_recording = RECORDING_CHILD.lock().map(|g| g.is_some()).unwrap_or(false);
+    if is_recording {
+        return Ok(());
+    }
+    let _ = fs::remove_file(LEARNING_AUDIO_PATH);
+    let child = Command::new(&helper)
+        .arg(LEARNING_AUDIO_PATH)
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("start learning audio: {e}"))?;
+    eprintln!("[learning-audio] started pid={}", child.id());
+    *guard = Some(child);
+    Ok(())
+}
+
+fn stop_learning_audio_internal() -> Result<(), String> {
+    let mut guard = LEARNING_AUDIO_CHILD.lock().map_err(|e| format!("lock: {e}"))?;
+    if let Some(mut child) = guard.take() {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+        }
+        let start = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if start.elapsed().as_secs() > 3 => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                Err(_) => break,
+            }
+        }
+        eprintln!("[learning-audio] stopped");
+    }
+    Ok(())
+}
+
+/// Start the persistent audio recorder for learning mode.
+#[tauri::command]
+pub async fn start_learning_audio() -> Result<(), String> {
+    start_learning_audio_internal()
+}
+
+/// Stop the persistent audio recorder.
+#[tauri::command]
+pub async fn stop_learning_audio() -> Result<(), String> {
+    stop_learning_audio_internal()?;
+    let _ = fs::remove_file(LEARNING_AUDIO_PATH);
+    Ok(())
+}
+
+/// Stop recorder, transcribe accumulated audio, restart recorder, return hints.
+#[tauri::command]
+pub async fn check_learning_audio(language: String) -> Result<Option<String>, String> {
+    let config = read_config_internal()?;
+    let api_key = config.api_key.ok_or("No API key")?;
+
+    // Don't interfere with manual recording
+    let is_recording = RECORDING_CHILD.lock().map(|g| g.is_some()).unwrap_or(false);
+    if is_recording {
+        return Ok(None);
+    }
+
+    // Stop recorder to finalize the file
+    stop_learning_audio_internal()?;
+
+    if !std::path::Path::new(LEARNING_AUDIO_PATH).exists() {
+        let _ = start_learning_audio_internal();
+        return Ok(None);
+    }
+
+    let size = fs::metadata(LEARNING_AUDIO_PATH).map(|m| m.len()).unwrap_or(0);
+    if size < 1000 {
+        let _ = fs::remove_file(LEARNING_AUDIO_PATH);
+        let _ = start_learning_audio_internal();
+        eprintln!("[learning-audio] clip too small ({size}B)");
+        return Ok(None);
+    }
+
+    eprintln!("[learning-audio] clip: {:.1}KB, transcribing...", size as f64 / 1024.0);
+
+    let whisper_output = Command::new("curl")
+        .args([
+            "-s",
+            "--max-time", "30",
+            "-X", "POST",
+            "https://api.openai.com/v1/audio/transcriptions",
+            "-H", &format!("Authorization: Bearer {api_key}"),
+            "-F", &format!("file=@{LEARNING_AUDIO_PATH}"),
+            "-F", "model=gpt-4o-mini-transcribe",
+            "-F", "prompt=Transcribe any speech. Ignore background music/SFX. If no speech, return empty.",
+        ])
+        .output()
+        .map_err(|e| format!("curl: {e}"))?;
+
+    let _ = fs::remove_file(LEARNING_AUDIO_PATH);
+    // Restart recorder immediately so we don't miss audio
+    let _ = start_learning_audio_internal();
+
+    if !whisper_output.status.success() {
+        return Ok(None);
+    }
+
+    let whisper_body: serde_json::Value =
+        serde_json::from_slice(&whisper_output.stdout).unwrap_or_default();
+    let transcript = whisper_body["text"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    if transcript.is_empty() || transcript.len() < 5 {
+        eprintln!("[learning-audio] no speech detected");
+        return Ok(None);
+    }
+
+    eprintln!("[learning-audio] transcript: {}", &transcript[..transcript.len().min(120)]);
+
+    let analysis_prompt = format!(
+        "You heard the following audio transcript. If it contains {language} speech, \
+         pick 1-2 interesting words or grammar patterns a {language} learner would benefit \
+         from knowing. Brief, voice-friendly explanation (2-3 sentences max). \
+         If NOT in {language} or just noise/music/English, respond exactly: NONE\n\n\
+         Transcript: {transcript}"
+    );
+
+    let gpt_payload = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "messages": [
+            {
+                "role": "system",
+                "content": format!("You are a {language} learning assistant. Keep responses very short and voice-friendly.")
+            },
+            { "role": "user", "content": analysis_prompt }
+        ],
+        "max_tokens": 200,
+        "temperature": 0.3
+    });
+
+    let gpt_output = Command::new("curl")
+        .args([
+            "-s",
+            "--max-time", "15",
+            "-X", "POST",
+            "https://api.openai.com/v1/chat/completions",
+            "-H", &format!("Authorization: Bearer {api_key}"),
+            "-H", "Content-Type: application/json",
+            "-d", &gpt_payload.to_string(),
+        ])
+        .output()
+        .map_err(|e| format!("curl gpt: {e}"))?;
+
+    if !gpt_output.status.success() {
+        return Ok(None);
+    }
+
+    let gpt_body: serde_json::Value =
+        serde_json::from_slice(&gpt_output.stdout).unwrap_or_default();
+
+    let hint = gpt_body["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("NONE")
+        .trim()
+        .to_string();
+
+    eprintln!("[learning-audio] hint: {}", &hint[..hint.len().min(100)]);
 
     if hint == "NONE" || hint.to_uppercase().starts_with("NONE") {
         Ok(None)
