@@ -10,6 +10,12 @@ Built with Tauri v2, OpenAI Realtime API, GPT-5.4 Computer Use, GPT-4o Vision, R
 
 https://github.com/user-attachments/assets/65314d07-694d-47c5-8209-24e5bdbdf55c
 
+### Active Learning Mode — Watch Anime, Learn Japanese
+
+![Samuel learning mode — watching anime while Samuel teaches Japanese vocabulary](docs/samuel-learning-mode.gif)
+
+Samuel runs as a transparent overlay on your desktop. While you watch anime, he periodically scans your screen and listens to audio, then proactively teaches you interesting vocabulary and grammar — no buttons pressed, no commands needed.
+
 ## How It Works
 
 ```
@@ -88,12 +94,15 @@ Samuel is a voice agent powered by OpenAI's Agents SDK (`@openai/agents/realtime
 - **Seamless integration** — analysis runs in background, Samuel notifies when ready, and you can chat about the clip
 - **Language agnostic** — works with Japanese, Chinese, Korean, Spanish, or any language
 
-### Active Learning Mode (Screen Scanning)
+### Active Learning Mode (Ambient Agent)
 - **Tell Samuel your language** — say "I'm learning Japanese" and learning mode activates
-- **Periodic screen scanning** — every 90 seconds, captures your screen and checks for target language content via GPT-4o Vision
-- **Proactive vocabulary hints** — when Japanese/Chinese/Korean text is detected, Samuel briefly mentions interesting words or grammar
-- **Silent when nothing found** — no interruptions if no target language is on screen
-- **Persistent across sessions** — learning language preference saved in localStorage
+- **Smart screen scanning** — captures your screen and checks for target language content via GPT-4o Vision, with change detection that skips duplicate frames to save API costs
+- **Continuous audio listening** — persistent system audio recorder captures ambient speech (anime, video) and transcribes it for vocabulary hints
+- **Three-way triage engine** — every observation is classified by gpt-4o-mini as `ignore` (silence), `notify` (subtle text card), or `act` (voice hint), preventing noisy false positives
+- **Attention-aware** — Samuel stays completely silent when you're in deep-focus apps (Cursor, Xcode, Terminal, etc.) and only speaks up when you're available
+- **Passive suggestion cards** — lower-confidence hints appear as a frosted-glass floating card that auto-dismisses in 8 seconds; tap to hear more
+- **Persistent memory** — vocabulary already taught is tracked in `~/.samuel/memory.json` with a 24-hour cooldown to avoid repetition; recent observations provide context for smarter triage
+- **Random intervals** — checks happen at random 30-90s intervals, not a fixed cadence, so Samuel feels natural rather than robotic
 - **Visual indicator** — blue "Learning: Japanese" badge on the character when active
 - **Combines with Record Mode** — Samuel suggests "start recording" when you're watching target-language video
 
@@ -207,13 +216,14 @@ src/                          React frontend (Vite + TypeScript)
 │   ├── useRealtime.ts        Realtime API connection, audio I/O, transcript, echo guard
 │   ├── useWakeWord.ts        "Hey Samuel" detection (continuous clips + Whisper)
 │   ├── useRecordMode.ts      Recording state, analysis progress, background analysis
-│   └── useLearningMode.ts    Active learning mode — periodic screen checks, persistence
+│   └── useLearningMode.ts    Ambient learning agent — triage, attention gate, persistent audio
 ├── lib/
 │   ├── samuel.ts             Agent definition: persona, tools, instructions
 │   ├── session-bridge.ts     Bridge for images, text, recording, and learning mode
 │   └── sounds.ts             Sound cues (chime on wake, tone on idle)
 ├── components/
 │   ├── Character.tsx          Rive character animation + manga speech bubbles + badges
+│   ├── PassiveSuggestion.tsx  Floating text card for ambient learning hints
 │   ├── ScreenPicker.tsx       Multi-monitor display selector dropdown
 │   └── StatusBar.tsx          Connection + agent state display
 └── styles/app.css             Transparent window, speech bubbles, animations
@@ -229,6 +239,7 @@ src-tauri/                    Rust backend (Tauri v2)
     │                         - Multi-monitor display detection + capture
     │                         - Ephemeral key minting for Realtime API
     │                         - Apple Books activation and window management
+    ├── memory.rs             Persistent session memory (vocabulary tracking, observations, facts)
     └── wake_word.rs          gpt-4o-mini-transcribe wake word with cross-clip matching
 ```
 
@@ -276,8 +287,6 @@ src-tauri/                    Rust backend (Tauri v2)
 
 ## Planned Features
 
-- **Persistent memory** — Samuel remembers your preferences, reading progress, and past conversations across sessions
-- **Proactive awareness** — idle observations, app switch detection, and context-aware suggestions
 - **Custom character design** — design your own Samuel with AI-generated SVG assets imported into Rive
 - **Local wake word model** — replace Whisper API with on-device detection for instant, offline, zero-cost activation
 - **Mobile companion** — iOS/Android app with the same voice agent
@@ -287,7 +296,7 @@ src-tauri/                    Rust backend (Tauri v2)
 
 - **macOS only** — relies on Apple Books and Peekaboo for screen capture/automation
 - **DRM** — protected books may produce black screenshots
-- **API costs** — each page read costs a Vision API call; chapter reads cost one per page; CUA navigation makes multiple calls per task; wake word uses gpt-4o-mini-transcribe (~$0.006/min while listening); learning mode screen checks ~$0.01-0.03 per scan (every 90s when active)
+- **API costs** — each page read costs a Vision API call; chapter reads cost one per page; CUA navigation makes multiple calls per task; wake word uses gpt-4o-mini-transcribe (~$0.006/min while listening); learning mode uses change detection to minimize scans but still costs ~$0.01-0.03 per Vision call + ~$0.001 per triage call when the screen changes
 - **GPT-5.4 access** — Computer Use requires API access to GPT-5.4 (launched March 2026)
 - **Copyright** — the Vision API may refuse to transcribe copyrighted text; accessibility-framed prompts help but are not guaranteed
 
