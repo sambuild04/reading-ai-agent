@@ -28,6 +28,7 @@ const TEMP_FILES: &[&str] = &[
     "/tmp/samuel-wake-debug.webm",
     "/tmp/samuel-wake-debug.mp4",
     "/tmp/samuel-learning-req.json",
+    "/tmp/samuel-learning-clip.m4a",
 ];
 
 /// Remove leftover temp files from previous sessions.
@@ -1549,5 +1550,178 @@ pub async fn check_screen_for_language(language: String) -> Result<Option<String
         Ok(None)
     } else {
         Ok(Some(text))
+    }
+}
+
+/// Record a brief clip of system audio, transcribe it, and check whether the
+/// target language is present. Returns vocabulary/grammar hints or None.
+#[tauri::command]
+pub async fn check_audio_for_language(language: String, duration_secs: Option<u64>) -> Result<Option<String>, String> {
+    let config = read_config_internal()?;
+    let api_key = config
+        .api_key
+        .ok_or("No API key configured")?;
+
+    // Don't interfere with an active user recording
+    let is_recording = RECORDING_CHILD
+        .lock()
+        .map(|g| g.is_some())
+        .unwrap_or(false);
+    if is_recording {
+        return Ok(None);
+    }
+
+    let helper = find_record_helper()?;
+    let clip_path = "/tmp/samuel-learning-clip.m4a";
+    let duration = duration_secs.unwrap_or(8);
+
+    // Remove stale clip
+    let _ = fs::remove_file(clip_path);
+
+    // Start the recorder
+    let mut child = Command::new(&helper)
+        .arg(clip_path)
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("Failed to start record-audio: {e}"))?;
+
+    eprintln!("[learning-mode] audio clip recording for {}s...", duration);
+
+    // Let it record for the specified duration
+    std::thread::sleep(std::time::Duration::from_secs(duration));
+
+    // SIGTERM to finalize the audio file
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+
+    // Wait for clean exit (up to 3s)
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if start.elapsed().as_secs() > 3 {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(_) => break,
+        }
+    }
+
+    if !std::path::Path::new(clip_path).exists() {
+        eprintln!("[learning-mode] audio clip not created");
+        return Ok(None);
+    }
+
+    let meta = fs::metadata(clip_path).ok();
+    let size = meta.map(|m| m.len()).unwrap_or(0);
+    if size < 1000 {
+        let _ = fs::remove_file(clip_path);
+        eprintln!("[learning-mode] audio clip too small ({}B), skipping", size);
+        return Ok(None);
+    }
+
+    eprintln!("[learning-mode] audio clip: {:.1}KB, transcribing...", size as f64 / 1024.0);
+
+    // Transcribe with gpt-4o-transcribe (auto-detect language)
+    let whisper_output = Command::new("curl")
+        .args([
+            "-s",
+            "--max-time", "30",
+            "-X", "POST",
+            "https://api.openai.com/v1/audio/transcriptions",
+            "-H", &format!("Authorization: Bearer {api_key}"),
+            "-F", &format!("file=@{clip_path}"),
+            "-F", "model=gpt-4o-mini-transcribe",
+            "-F", "prompt=Transcribe any speech in this audio clip. There may be background music and sound effects. If there is no speech, return empty.",
+        ])
+        .output()
+        .map_err(|e| format!("curl transcribe: {e}"))?;
+
+    let _ = fs::remove_file(clip_path);
+
+    if !whisper_output.status.success() {
+        return Ok(None);
+    }
+
+    let whisper_body: serde_json::Value = serde_json::from_slice(&whisper_output.stdout)
+        .unwrap_or_default();
+
+    let transcript = whisper_body["text"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    if transcript.is_empty() || transcript.len() < 5 {
+        eprintln!("[learning-mode] audio: no speech detected");
+        return Ok(None);
+    }
+
+    eprintln!("[learning-mode] audio transcript: {}", &transcript[..transcript.len().min(120)]);
+
+    // Ask GPT-4o if this contains the target language and for interesting vocabulary/grammar
+    let analysis_prompt = format!(
+        "You heard the following audio transcript. Determine if it contains {language} speech. \
+         If it does, pick 1-2 interesting words or grammar patterns a {language} learner would \
+         benefit from knowing. Give a brief, voice-friendly explanation (2-3 sentences max). \
+         If the transcript is NOT in {language}, or is just music/noise/English, respond with exactly: NONE\n\n\
+         Transcript: {transcript}"
+    );
+
+    let gpt_payload = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "messages": [
+            {
+                "role": "system",
+                "content": format!(
+                    "You are a {language} language learning assistant. \
+                     You analyze audio transcripts and highlight interesting vocabulary or grammar \
+                     for a learner. Keep responses very short and suitable for a voice assistant."
+                )
+            },
+            { "role": "user", "content": analysis_prompt }
+        ],
+        "max_tokens": 200,
+        "temperature": 0.3
+    });
+
+    let gpt_output = Command::new("curl")
+        .args([
+            "-s",
+            "--max-time", "15",
+            "-X", "POST",
+            "https://api.openai.com/v1/chat/completions",
+            "-H", &format!("Authorization: Bearer {api_key}"),
+            "-H", "Content-Type: application/json",
+            "-d", &gpt_payload.to_string(),
+        ])
+        .output()
+        .map_err(|e| format!("curl gpt: {e}"))?;
+
+    if !gpt_output.status.success() {
+        return Ok(None);
+    }
+
+    let gpt_body: serde_json::Value = serde_json::from_slice(&gpt_output.stdout)
+        .unwrap_or_default();
+
+    let hint = gpt_body["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("NONE")
+        .trim()
+        .to_string();
+
+    eprintln!("[learning-mode] audio analysis: {}", &hint[..hint.len().min(100)]);
+
+    if hint == "NONE" || hint.to_uppercase().starts_with("NONE") {
+        Ok(None)
+    } else {
+        Ok(Some(hint))
     }
 }
