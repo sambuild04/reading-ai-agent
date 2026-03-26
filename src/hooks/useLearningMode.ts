@@ -4,7 +4,12 @@ import { registerLearningLanguage, sendTextAndRespond } from "../lib/session-bri
 import type { ConnectionStatus } from "./useRealtime";
 
 const STORAGE_KEY = "samuel-learning-language";
-const CHECK_INTERVAL_MS = 45_000; // 45 seconds — alternates between screen and audio
+const MIN_INTERVAL_MS = 30_000; // minimum 30s between checks
+const MAX_INTERVAL_MS = 90_000; // maximum 90s between checks
+
+function randomInterval(): number {
+  return MIN_INTERVAL_MS + Math.random() * (MAX_INTERVAL_MS - MIN_INTERVAL_MS);
+}
 
 export interface UseLearningModeReturn {
   learningLanguage: string | null;
@@ -83,13 +88,27 @@ export function useLearningMode(sessionStatus: ConnectionStatus): UseLearningMod
       }
     };
 
-    const interval = setInterval(check, CHECK_INTERVAL_MS);
-    // Run the first check after a short delay (let the session stabilize)
-    const initialTimeout = setTimeout(check, 10_000);
+    let timer: ReturnType<typeof setTimeout>;
+    let cancelled = false;
+
+    const scheduleNext = () => {
+      if (cancelled) return;
+      const delay = randomInterval();
+      timer = setTimeout(async () => {
+        await check();
+        scheduleNext();
+      }, delay);
+    };
+
+    // First check after a short stabilization delay, then random intervals
+    timer = setTimeout(async () => {
+      await check();
+      scheduleNext();
+    }, 10_000);
 
     return () => {
-      clearInterval(interval);
-      clearTimeout(initialTimeout);
+      cancelled = true;
+      clearTimeout(timer);
       setActive(false);
     };
   }, [language, sessionStatus]);
