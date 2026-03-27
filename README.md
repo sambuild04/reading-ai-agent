@@ -1,305 +1,256 @@
-# Samuel — Your AI Desktop Companion for Reading & Language Learning
+# Samuel — AI Desktop Pet That Watches Anime With You and Teaches You Japanese
 
-An always-on-top, transparent desktop AI assistant for macOS — like QQ Pet meets JARVIS. Samuel floats on your screen as an animated character with manga-style speech bubbles, reads your Apple Books aloud, helps you learn Japanese/Chinese/Korean from any app, and responds to voice commands hands-free.
+> An always-listening, always-watching AI companion that sits on your desktop like a virtual pet. Say "Hey Samuel" and he reads your books aloud, watches anime with you, and teaches you Japanese vocabulary in real time — all by voice conversation. Built with Tauri v2 + OpenAI Realtime API.
 
-Built with Tauri v2, OpenAI Realtime API, GPT-5.4 Computer Use, GPT-4o Vision, Rive character animation, and Whisper-powered wake word detection.
-
-**Keywords**: AI reading assistant, macOS AI desktop companion, voice-controlled book reader, Apple Books AI, language learning AI, Japanese learning tool, anime language learning, real-time translation, GPT-5.4 computer use, OpenAI Realtime API voice agent, Tauri desktop app, QQ Pet style AI, transparent desktop widget, Rive animation, system audio recording, active screen scanning, proactive AI assistant, JARVIS-style AI
+![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)
+![macOS](https://img.shields.io/badge/platform-macOS-black.svg)
+![Tauri v2](https://img.shields.io/badge/Tauri-v2-orange.svg)
+![OpenAI](https://img.shields.io/badge/OpenAI-Realtime%20API-412991.svg)
 
 ## Demo
 
 https://github.com/user-attachments/assets/65314d07-694d-47c5-8209-24e5bdbdf55c
 
-### Active Learning Mode — Watch Anime, Learn Japanese
+### Watch Anime, Learn Japanese — Automatically
 
-![Samuel learning mode — watching anime while Samuel teaches Japanese vocabulary](docs/samuel-learning-mode.gif)
+![Samuel ambient learning — watches anime, teaches Japanese vocabulary from subtitles and audio](docs/samuel-learning-mode.gif)
 
-Samuel runs as a transparent overlay on your desktop. While you watch anime, he periodically scans your screen and listens to audio, then proactively teaches you interesting vocabulary and grammar — no buttons pressed, no commands needed.
+Samuel floats on your desktop as a transparent animated character. While you watch anime, he **listens to the dialogue and reads the subtitles simultaneously**, then teaches you interesting vocabulary and grammar — without you pressing a single button.
+
+Ask him "what did they just say?" and he answers instantly because he was listening the whole time, just like a tutor sitting next to you.
+
+---
+
+## Why Samuel?
+
+Most language learning apps make you stop what you're doing to study. Samuel is the opposite — he learns **with** you while you do things you already enjoy:
+
+- **Watching anime?** Samuel hears the Japanese dialogue, reads the subtitles, and teaches you new words
+- **Browsing the web in English?** Samuel notices interesting words on screen and teaches you how to say them in Japanese
+- **Reading a book?** Samuel reads it aloud to you and answers questions about what you just read
+- **Just hanging out?** Samuel sits quietly on your desktop until you need him — say "Hey Samuel" anytime
+
+He's not a chatbot in a browser tab. He's a **desktop companion** — always visible, always listening, always ready.
+
+---
+
+## Key Features
+
+### Always-Listening Ambient Agent
+Samuel continuously monitors your screen and system audio in the background. Every 20 seconds, he captures what's on screen and transcribes nearby audio — anime dialogue, YouTube videos, podcasts — and silently absorbs it as context. He won't interrupt you unless he spots something genuinely interesting. But when you ask "what was that word?", he knows exactly what you're talking about.
+
+- **Parallel screen + audio monitoring** — both checked every 20 seconds
+- **Smart triage engine** — GPT-4o-mini classifies every observation as ignore/notify/act
+- **Attention-aware** — stays silent when you're coding in VS Code, Xcode, or Terminal
+- **Cross-language teaching** — even English content triggers "do you know how to say X in Japanese?" moments
+- **Persistent memory** — tracks vocabulary already taught, avoids repeating itself for 24 hours
+- **Process-filtered audio** — captures system audio but excludes Samuel's own voice via ScreenCaptureKit
+
+### Voice-First Desktop Companion
+- **"Hey Samuel" wake word** — hands-free activation, just like Siri or Alexa
+- **Real-time voice conversation** — OpenAI Realtime API with natural speech-to-speech
+- **British butler persona** — polished, helpful, slightly formal ("Yes, sir")
+- **Always-on session** — no idle timeout; heartbeat keepalive + auto-reconnect with context preservation
+- **Transparent floating window** — sits on top of all apps like a desktop pet (QQ Pet / Bonzi Buddy, but actually useful)
+- **Rive character animation** — animated states: idle, listening, thinking, speaking
+- **Manga-style speech bubbles** — frosted-glass aesthetic with backdrop blur
+
+### Smart Book Reading (Apple Books)
+- **Read any page aloud** — captures the page as an image, reads it via Realtime API
+- **Full chapter reading** — automatically turns pages and reads until the next chapter heading
+- **Visual navigation** — GPT-5.4 Computer Use sees your screen and clicks through Apple Books UI
+- **Follow-up questions** — "What did that paragraph mean?" — answers from memory
+
+### Language Learning Tools
+- **Real-time screen translation** — captures your screen, translates all visible foreign text
+- **Grammar breakdown** — sentence structure, particles, conjugation, politeness levels
+- **Pronunciation coach** — speaks words slowly then naturally, with pitch accent tips
+- **Recording mode** — captures system audio from anime/video, then provides full vocabulary + grammar analysis
+- **Auto-detect language** — Japanese, Chinese, Korean, Spanish, or any language on screen
+
+### Session Resilience
+- **Heartbeat keepalive** — pings every 30s to prevent server-side idle timeout
+- **Session rotation** — auto-reconnects every 25 min before the 60-min hard cap
+- **Context preservation** — last 6 conversation turns replayed on reconnect
+- **Auto-reconnect on drop** — detects unexpected disconnects and recovers in 2 seconds
+
+---
 
 ## How It Works
 
 ```
-You speak → Realtime API (gpt-realtime) → Samuel picks tools → Action executes → Samuel responds with voice
+You speak → "Hey Samuel" wake word → OpenAI Realtime API → Samuel picks tools → Action executes → Voice response
+         ↕                                                    ↕
+   Always listening                                  Always watching screen
+   (system audio via                                 (GPT-4o Vision every
+    ScreenCaptureKit)                                 20s, change detection)
 ```
 
-Samuel is a voice agent powered by OpenAI's Agents SDK (`@openai/agents/realtime`). He listens through your microphone and responds with natural speech in real time. When you ask him to do something, he picks the right tool:
+Samuel is a voice agent built on OpenAI's Agents SDK (`@openai/agents/realtime`). He listens through your microphone and responds with natural speech. When you ask him to do something, he picks the right tool:
 
-| Request | Tool | How |
-|---|---|---|
-| "Read this page" | `read_page` | Captures Apple Books page as image, reads it via Realtime API |
-| "Summarize chapter 9" | `read_chapter` | Loops Vision API reads + page turns until next chapter heading |
-| "Go to chapter 6" | `interact_with_book` | GPT-5.4 Computer Use sees the screen and navigates visually |
-| "Turn the page" | `next_page` | Instant hotkey via Peekaboo |
-| "Look at my screen" | `view_screen` | Captures any app window and shows it to the AI |
-| "Translate this" | `translate_screen` | Captures screen, translates all foreign text |
-| "Explain this grammar" | `explain_grammar` | Captures screen, breaks down grammar points |
-| "How do you say hello?" | `pronounce` | Speaks correct pronunciation in any language |
-| "Start recording" | `start_recording` | Captures system audio (anime, video) for language analysis |
-| "Stop recording" | `stop_recording` | Stops recording, runs background analysis with vocabulary/grammar |
-| "I'm learning Japanese" | `set_learning_language` | Activates learning mode — periodic screen scanning for target language |
-| "What time is it?" | `get_current_time` | Returns local date, time, day, and timezone |
+| What you say | What happens |
+|---|---|
+| "Read this page" | Captures Apple Books page, reads it aloud |
+| "Summarize chapter 9" | Reads every page via Vision API until next chapter |
+| "Go to chapter 6" | GPT-5.4 Computer Use navigates the app visually |
+| "Look at my Chrome" | Captures Chrome window on any monitor |
+| "Translate my screen" | Translates all visible foreign text |
+| "Explain this grammar" | Breaks down Japanese/Korean/Chinese grammar |
+| "How do you say 'cat'?" | Pronounces it in target language |
+| "Start recording" | Captures system audio for deep analysis |
+| "I'm learning Japanese" | Activates ambient learning mode |
+| "What did they just say?" | References ambient audio transcripts to answer |
 
-## Features
-
-### Animated Desktop Companion (QQ Pet Style)
-- **Transparent floating window** — Samuel sits on top of all apps like a desktop pet
-- **Rive character animation** — animated expressions mapped to agent states (idle, listening, thinking, speaking)
-- **Manga-style speech bubbles** — chat appears in frosted-glass speech bubbles around the character, no separate chat window
-- **Draggable** — grab and move Samuel anywhere on your desktop
-- **Always on top** — stays visible while you read or browse
-
-### "Hey Samuel" Wake Word
-- Hands-free activation — just say "Hey Samuel" and the assistant connects
-- Uses Web Audio API + OpenAI Whisper for continuous speech detection
-- Plays a chime on activation and a soft tone when going idle
-- Automatically returns to listening mode after inactivity (15s grace period after greeting)
-
-### Voice Conversation
-- Real-time speech-to-speech via OpenAI Realtime API
-- Natural voice with polished British butler persona
-- Server-side VAD with echo cancellation and noise reduction
-- Multi-layered echo guard prevents the agent from responding to its own speech
-
-### Smart Book Reading
-- **Single page**: Captures the Apple Books page as an image and reads it directly via the Realtime model
-- **Full chapter**: Automatically reads every page, turning them one by one, stops when it detects the next chapter heading
-- **Partial reading**: "Read the first sentence" — reads the page, speaks only the requested portion
-- **Follow-up questions**: Answers from memory without re-reading
-
-### Visual Navigation (GPT-5.4 Computer Use)
-- Sees the actual screen and clicks, types, scrolls through Apple Books
-- Navigate to any chapter by visually finding it
-- Open table of contents, search for text, interact with any UI element
-- Autonomous multi-step navigation without brittle hotkey sequences
-
-### Language Learning (Japanese, Chinese, Korean & More)
-- **Screen capture from any app** — look at a browser with Japanese text, a textbook PDF, a language learning site
-- **Real-time translation** — captures your screen and translates all visible foreign text with readings and pronunciation
-- **Grammar explanation** — breaks down sentence structure, particles, conjugation, politeness levels, with examples
-- **Pronunciation** — speaks words/phrases slowly then at natural speed, with tips on pitch accent/tones
-- **Auto-detect language** — works with Japanese, Chinese, Korean, Spanish, or any language on screen
-- For Japanese: always includes furigana/romaji. For Chinese: pinyin with tone marks. For Korean: romanization.
-
-### Multi-Monitor Support
-- **Voice-driven targeting**: Say "look at my Chrome" or "translate what's in Safari" — Samuel captures the right app window, even on a different display
-- **Display picker UI**: Small monitor icon in the header lets you choose which display to capture by default
-- **Automatic display detection**: When targeting a specific app, Samuel determines which physical monitor the app is on using window position mapping
-- **Screen target indicator**: A brief "Looking at: Chrome" badge appears so you always know what Samuel captured
-
-### Recording Mode (System Audio Capture)
-- **Record anime/video audio** — say "start recording" while watching, Samuel captures system audio in the background
-- **Automatic language analysis** — after stopping, GPT-4o-transcribe + GPT-4o analyze the recording for vocabulary, grammar, and dialogue
-- **Bilingual transcript** — original dialogue with English translations side by side
-- **Visual progress bar** — two-stage indicator (Transcribing → Analyzing) with elapsed time
-- **Seamless integration** — analysis runs in background, Samuel notifies when ready, and you can chat about the clip
-- **Language agnostic** — works with Japanese, Chinese, Korean, Spanish, or any language
-
-### Active Learning Mode (Ambient Agent)
-- **Tell Samuel your language** — say "I'm learning Japanese" and learning mode activates
-- **Smart screen scanning** — captures your screen and checks for target language content via GPT-4o Vision, with change detection that skips duplicate frames to save API costs
-- **Continuous audio listening** — persistent system audio recorder captures ambient speech (anime, video) and transcribes it for vocabulary hints
-- **Three-way triage engine** — every observation is classified by gpt-4o-mini as `ignore` (silence), `notify` (subtle text card), or `act` (voice hint), preventing noisy false positives
-- **Attention-aware** — Samuel stays completely silent when you're in deep-focus apps (Cursor, Xcode, Terminal, etc.) and only speaks up when you're available
-- **Passive suggestion cards** — lower-confidence hints appear as a frosted-glass floating card that auto-dismisses in 8 seconds; tap to hear more
-- **Persistent memory** — vocabulary already taught is tracked in `~/.samuel/memory.json` with a 24-hour cooldown to avoid repetition; recent observations provide context for smarter triage
-- **Random intervals** — checks happen at random 30-90s intervals, not a fixed cadence, so Samuel feels natural rather than robotic
-- **Visual indicator** — blue "Learning: Japanese" badge on the character when active
-- **Combines with Record Mode** — Samuel suggests "start recording" when you're watching target-language video
-
-### Time-Aware Greetings
-- Samuel greets contextually based on your local time — "Good evening, sir" instead of generic hello
-- Current date and time injected at session start
-- Timezone-aware via `get_current_time` tool
-
-### UI & Experience
-- **Frosted-glass speech bubbles** with backdrop blur — translucent, modern aesthetic
-- **Screen target badge** — shows which app/display was captured after each screen tool use
-- **State indicators**: listening waveform, thinking animation, speaking glow
-- **Mic mute and disconnect controls** in the draggable header bar
-- **Auto-reconnect** — detects server-side session timeouts and reconnects cleanly on next wake word
-
-## Requirements
-
-- **macOS** (Apple Books + Peekaboo)
-- **Node.js** 20+
-- **Rust** (for Tauri — install via [rustup.rs](https://rustup.rs))
-- **Peekaboo** for screen capture and UI automation
-- **OpenAI API key** with access to GPT-4o, Realtime API, and GPT-5.4
-
-## Setup
-
-### 1. Install Peekaboo
-
-```bash
-brew install steipete/tap/peekaboo
-```
-
-Grant permissions when prompted:
-- **Screen Recording** — so Peekaboo can capture screenshots
-- **Accessibility** — so Peekaboo can send keystrokes and clicks
-
-Verify:
-```bash
-peekaboo permissions
-```
-
-### 2. Install Rust
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source ~/.cargo/env
-```
-
-### 3. Install dependencies
-
-```bash
-cd books-reader
-npm install
-```
-
-### 4. Set your API key
-
-Create `~/.books-reader.json`:
-
-```json
-{
-  "apiKey": "sk-..."
-}
-```
-
-Or set the environment variable:
-
-```bash
-export OPENAI_API_KEY="sk-..."
-```
-
-### 5. Grant Screen Recording permission
-
-The Tauri app needs Screen Recording access to capture Apple Books pages and other app windows. Go to:
-
-**System Settings → Privacy & Security → Screen Recording** → add the `samuel` binary (found at `src-tauri/target/debug/samuel` during development).
-
-Also ensure `peekaboo` is listed there.
-
-## Usage
-
-Open a book in Apple Books, then:
-
-```bash
-npm run tauri:dev
-```
-
-Say **"Hey Samuel"** and start talking:
-
-- "Samuel, read the current page"
-- "Summarize chapter 9 for me"
-- "Go to chapter 4"
-- "Search for the word 'traction'"
-- "What did that last part mean?"
-- "Turn to the next page and read it"
-- "Look at my Chrome" (captures Chrome on any monitor)
-- "Translate what's on my screen"
-- "Explain the grammar of this sentence"
-- "How do you pronounce こんにちは?"
-- "Start recording" (captures system audio while you watch anime)
-- "Stop recording" (analyzes the clip for vocabulary and grammar)
-- "I'm learning Japanese" (activates periodic screen scanning for Japanese content)
-- "Stop learning mode"
-- "What time is it?"
+---
 
 ## Architecture
 
 ```
 src/                          React frontend (Vite + TypeScript)
-├── App.tsx                   Main app layout + wake word flow + idle detection
+├── App.tsx                   Main app + wake word flow
 ├── hooks/
-│   ├── useRealtime.ts        Realtime API connection, audio I/O, transcript, echo guard
-│   ├── useWakeWord.ts        "Hey Samuel" detection (continuous clips + Whisper)
-│   ├── useRecordMode.ts      Recording state, analysis progress, background analysis
-│   └── useLearningMode.ts    Ambient learning agent — triage, attention gate, persistent audio
+│   ├── useRealtime.ts        Realtime API: heartbeat, reconnect, context replay
+│   ├── useWakeWord.ts        "Hey Samuel" detection (Whisper + cross-clip matching)
+│   ├── useRecordMode.ts      System audio recording + analysis pipeline
+│   └── useLearningMode.ts    Ambient agent: parallel audio+screen, triage, silent context
 ├── lib/
-│   ├── samuel.ts             Agent definition: persona, tools, instructions
-│   ├── session-bridge.ts     Bridge for images, text, recording, and learning mode
-│   └── sounds.ts             Sound cues (chime on wake, tone on idle)
+│   ├── samuel.ts             Agent persona, 15 tools, ambient awareness instructions
+│   ├── session-bridge.ts     Bridges: image, text, silent context, recording, learning
+│   └── sounds.ts             Audio cues (chime on wake, tone on idle)
 ├── components/
-│   ├── Character.tsx          Rive character animation + manga speech bubbles + badges
-│   ├── PassiveSuggestion.tsx  Floating text card for ambient learning hints
-│   ├── ScreenPicker.tsx       Multi-monitor display selector dropdown
-│   └── StatusBar.tsx          Connection + agent state display
-└── styles/app.css             Transparent window, speech bubbles, animations
+│   ├── Character.tsx          Rive animation + manga speech bubbles
+│   ├── PassiveSuggestion.tsx  Frosted-glass hint card for ambient observations
+│   ├── ScreenPicker.tsx       Multi-monitor display selector
+│   └── StatusBar.tsx          Connection state display
+└── styles/app.css             Transparent window, animations
 
 src-tauri/                    Rust backend (Tauri v2)
+├── helpers/
+│   └── record-audio.swift    ScreenCaptureKit audio capture with PID filtering
 └── src/
-    ├── lib.rs                Tauri command registration + macOS transparency setup
-    ├── commands.rs           All backend logic:
-    │                         - Peekaboo wrappers (capture, hotkeys, click)
-    │                         - GPT-4o Vision API (analyze_page, check_screen_for_language)
-    │                         - GPT-5.4 Computer Use loop (computer_use_task)
-    │                         - System audio recording + transcription + analysis
-    │                         - Multi-monitor display detection + capture
-    │                         - Ephemeral key minting for Realtime API
-    │                         - Apple Books activation and window management
-    ├── memory.rs             Persistent session memory (vocabulary tracking, observations, facts)
-    └── wake_word.rs          gpt-4o-mini-transcribe wake word with cross-clip matching
+    ├── lib.rs                Tauri setup + macOS window transparency (Cocoa)
+    ├── commands.rs           Screen capture, Vision API, Computer Use, audio pipeline,
+    │                         triage engine, ephemeral keys, display detection
+    ├── memory.rs             Persistent memory: vocabulary, transcripts, observations
+    └── wake_word.rs          Whisper-based wake word with cross-clip matching
 ```
-
-### Tool Architecture
-
-| Tool | Backend | Model | Speed | Best for |
-|---|---|---|---|---|
-| `read_page` | Direct image → Realtime API | `gpt-realtime` | ~2s | Reading one page |
-| `read_chapter` | Vision API loop | `gpt-4o` | ~3s/page | Reading full chapters |
-| `interact_with_book` | Responses API | `gpt-5.4` CUA | ~5-10s/turn | Navigation, search, complex UI |
-| `view_screen` | Peekaboo / screencapture | `gpt-realtime` | ~2s | Looking at any app |
-| `translate_screen` | Peekaboo / screencapture | `gpt-realtime` | ~2s | Translating screen content |
-| `explain_grammar` | Peekaboo / screencapture | `gpt-realtime` | ~2s | Grammar explanations |
-| `pronounce` | Realtime voice output | `gpt-realtime` | Instant | Pronunciation |
-| `next_page` / `prev_page` | Peekaboo hotkey | None | Instant | Simple page turns |
-| `start_recording` / `stop_recording` | ScreenCaptureKit (Swift helper) | None | Instant | System audio capture |
-| `analyze_recording` | gpt-4o-transcribe + GPT-4o | `gpt-4o` | ~10-30s | Recording breakdown |
-| `check_screen_for_language` | GPT-4o Vision (low detail) | `gpt-4o` | ~3-5s | Learning mode scans |
-| `set_learning_language` | localStorage + bridge | None | Instant | Toggle learning mode |
-| `get_current_time` | JS Date API | None | Instant | Timezone awareness |
 
 ### Multi-Model Strategy
 
-- **Realtime API** (`read_page`, `view_screen`, `translate_screen`, `explain_grammar`): Images injected directly into the Realtime session. The model sees the screenshot and responds with voice in one round-trip. Fastest for interactive use.
-- **GPT-4o Vision** (`read_chapter`): Fast text extraction with high output limits. Used for batch page reading where text is needed for chapter boundary detection.
-- **GPT-5.4 Computer Use** (`interact_with_book`): Takes screenshots and returns UI actions (click, type, scroll). Ideal for navigation but slower per turn.
+| Model | Used for | Speed |
+|---|---|---|
+| **OpenAI Realtime API** | Voice conversation, page reading, translation, grammar | ~2s |
+| **GPT-4o Vision** | Chapter reading, screen scanning, ambient observation | ~3-5s |
+| **GPT-4o-mini** | Triage engine (ignore/notify/act classification) | ~1s |
+| **GPT-5.4 Computer Use** | Visual navigation (click, scroll, type in Apple Books) | ~5-10s/turn |
+| **gpt-4o-mini-transcribe** | Wake word detection, ambient audio transcription | ~1s |
+| **gpt-4o-transcribe** | Recording mode (high-quality transcription) | ~3-10s |
+
+---
 
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
-| Desktop Framework | Tauri v2 (Rust + WebView) |
+| Desktop Framework | [Tauri v2](https://v2.tauri.app) (Rust + WebView) |
 | Frontend | React 19 + Vite + TypeScript |
-| Voice AI | OpenAI Realtime API (`gpt-realtime`) |
+| Voice AI | [OpenAI Realtime API](https://platform.openai.com/docs/guides/realtime) |
+| Agent Framework | [`@openai/agents`](https://github.com/openai/openai-agents-js) (Agents SDK) |
 | Vision AI | OpenAI GPT-4o Vision |
 | Computer Use | OpenAI GPT-5.4 (Responses API) |
-| Agent SDK | `@openai/agents/realtime` |
-| Character Animation | Rive (`@rive-app/react-canvas`) |
-| Speech Transcription | gpt-4o-transcribe, gpt-4o-mini-transcribe |
-| Wake Word | Web Audio API + gpt-4o-mini-transcribe (continuous) |
-| Screen Capture | Peekaboo + macOS screencapture |
-| System Audio | ScreenCaptureKit (Swift helper) |
+| Character Animation | [Rive](https://rive.app) (`@rive-app/react-canvas`) |
+| Screen Capture | [Peekaboo](https://github.com/nicklama/peekaboo) + macOS `screencapture` |
+| System Audio | ScreenCaptureKit (Swift, with process-level filtering) |
 | Window Transparency | Cocoa NSWindow APIs via `macos-private-api` |
 | Styling | Tailwind CSS + custom animations |
 
+---
+
+## Quick Start
+
+### Prerequisites
+- **macOS 14+** (Sonoma or later)
+- **Node.js 20+**
+- **Rust** ([rustup.rs](https://rustup.rs))
+- **OpenAI API key** with Realtime API + GPT-4o + GPT-5.4 access
+
+### Install
+
+```bash
+# 1. Install Peekaboo (screen capture + automation)
+brew install steipete/tap/peekaboo
+
+# 2. Clone and install
+git clone https://github.com/sambuild04/reading-ai-agent.git
+cd reading-ai-agent
+npm install
+
+# 3. Compile the audio helper
+swiftc -o src-tauri/helpers/record-audio src-tauri/helpers/record-audio.swift \
+  -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia
+
+# 4. Set your API key
+echo '{"apiKey": "sk-..."}' > ~/.books-reader.json
+
+# 5. Grant Screen Recording permission
+# System Settings → Privacy & Security → Screen Recording → add peekaboo + samuel
+
+# 6. Run
+npm run tauri:dev
+```
+
+Then say **"Hey Samuel"** and start talking.
+
+---
+
+## Example Conversations
+
+**Reading a book:**
+> "Samuel, read this page for me."
+> *Samuel captures the Apple Books page, reads it aloud in his British butler voice*
+> "What does the author mean by 'antifragile'?"
+> *Samuel answers from memory without re-reading*
+
+**Watching anime with learning mode:**
+> "I'm learning Japanese."
+> *Learning mode activates. Samuel starts monitoring screen + audio.*
+> *30 seconds later, while watching:*
+> "Sir, I just caught an interesting word — 新たな試み means 'new attempt.' The grammar pattern here uses な to connect the adjective 新た to the noun."
+> "What did the character say before that?"
+> "From what I overheard, they said 類いを見ない新たな試みが取り入れられている — meaning 'an unprecedented new approach has been adopted.'"
+
+**Browsing the web:**
+> *Samuel sees English text about cooking on your screen*
+> "Do you know how to say 'recipe' in Japanese, sir? It's レシピ — or the more traditional 料理法."
+
+---
+
 ## Planned Features
 
-- **Custom character design** — design your own Samuel with AI-generated SVG assets imported into Rive
-- **Local wake word model** — replace Whisper API with on-device detection for instant, offline, zero-cost activation
-- **Mobile companion** — iOS/Android app with the same voice agent
-- **Flashcard generation** — automatically create Anki-compatible cards from vocabulary and grammar points found during learning sessions
+- **Local wake word** — on-device detection for instant, offline, zero-cost "Hey Samuel"
+- **Custom character design** — design your own companion with AI-generated assets + Rive
+- **Anki flashcard export** — auto-generate cards from vocabulary discovered during learning
+- **iOS/Android companion** — same voice agent on mobile
+- **Multi-language simultaneous** — learn Japanese and Korean at the same time
 
 ## Limitations
 
-- **macOS only** — relies on Apple Books and Peekaboo for screen capture/automation
-- **DRM** — protected books may produce black screenshots
-- **API costs** — each page read costs a Vision API call; chapter reads cost one per page; CUA navigation makes multiple calls per task; wake word uses gpt-4o-mini-transcribe (~$0.006/min while listening); learning mode uses change detection to minimize scans but still costs ~$0.01-0.03 per Vision call + ~$0.001 per triage call when the screen changes
-- **GPT-5.4 access** — Computer Use requires API access to GPT-5.4 (launched March 2026)
-- **Copyright** — the Vision API may refuse to transcribe copyrighted text; accessibility-framed prompts help but are not guaranteed
+- **macOS only** — relies on Apple Books, Peekaboo, and ScreenCaptureKit
+- **DRM content** — protected books may produce black screenshots
+- **API costs** — wake word ~$0.006/min; ambient learning ~$0.02-0.05/min (Vision + transcription + triage); book reading ~$0.01/page
+- **GPT-5.4** — Computer Use navigation requires GPT-5.4 API access
+- **Copyright** — Vision API may refuse to transcribe copyrighted text verbatim
+
+---
+
+## Star History
+
+If you find Samuel useful, please star the repo — it helps others discover the project.
 
 ## License
 
 MIT
+
+---
+
+**Built by [Sam Feng](https://github.com/sambuild04)** — a solo project combining OpenAI's latest APIs into something that feels like magic.
