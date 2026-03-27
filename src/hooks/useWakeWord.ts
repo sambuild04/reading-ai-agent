@@ -16,7 +16,11 @@ function containsFullWakeWord(text: string): boolean {
     lower.includes("hay samuel") ||
     lower.includes("hey samual") ||
     lower.includes("hey samuell") ||
-    (lower.includes("hey sam") && !lower.includes("same"))
+    (lower.includes("hey sam") && !lower.includes("same")) ||
+    // Accept standalone "Samuel" — Whisper often drops the "Hey"
+    lower === "samuel" ||
+    lower === "samual" ||
+    lower === "samuell"
   );
 }
 

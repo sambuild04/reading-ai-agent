@@ -6,6 +6,7 @@ use std::sync::Mutex;
 const MEMORY_DIR: &str = ".samuel";
 const MEMORY_FILE: &str = "memory.json";
 const MAX_RECENT_OBSERVATIONS: usize = 10;
+const MAX_RECENT_TRANSCRIPTS: usize = 5;
 const VOCABULARY_COOLDOWN_SECS: u64 = 24 * 60 * 60;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -16,6 +17,9 @@ pub struct SamuelMemory {
     pub recent_observations: Vec<String>,
     #[serde(default)]
     pub facts: HashMap<String, String>,
+    /// Raw audio transcripts from ambient listening — Samuel can reference these when asked
+    #[serde(default)]
+    pub recent_transcripts: Vec<String>,
 }
 
 static MEMORY: Mutex<Option<SamuelMemory>> = Mutex::new(None);
@@ -119,6 +123,19 @@ pub fn record_observation(summary: &str) {
             mem.recent_observations.remove(0);
         }
     });
+}
+
+pub fn record_transcript(text: &str) {
+    with_memory(|mem| {
+        mem.recent_transcripts.push(text.to_string());
+        if mem.recent_transcripts.len() > MAX_RECENT_TRANSCRIPTS {
+            mem.recent_transcripts.remove(0);
+        }
+    });
+}
+
+pub fn get_recent_transcripts() -> Vec<String> {
+    with_memory(|mem| mem.recent_transcripts.clone())
 }
 
 pub fn record_vocabulary(words: &[String]) {

@@ -9,6 +9,7 @@ type SendTextFn = (text: string) => void;
 type ScreenTargetFn = (appName: string) => void;
 type RecordingActionFn = (action: "start" | "stop" | "processing" | "analyze" | "results" | "error", payload?: unknown) => void;
 type LearningLanguageFn = (language: string | null) => void;
+type SendSilentContextFn = (text: string) => void;
 type SendTextAndRespondFn = (text: string) => void;
 
 let sendImageFn: SendImageFn | null = null;
@@ -16,6 +17,7 @@ let sendTextFn: SendTextFn | null = null;
 let screenTargetFn: ScreenTargetFn | null = null;
 let recordingActionFn: RecordingActionFn | null = null;
 let learningLanguageFn: LearningLanguageFn | null = null;
+let sendSilentContextFn: SendSilentContextFn | null = null;
 let sendTextAndRespondFn: SendTextAndRespondFn | null = null;
 
 export function registerSendImage(fn: SendImageFn | null) {
@@ -75,6 +77,21 @@ export function registerLearningLanguage(fn: LearningLanguageFn | null) {
 /** Called by Samuel's set_learning_language tool to activate/deactivate learning mode. */
 export function notifyLearningLanguage(language: string | null) {
   learningLanguageFn?.(language);
+}
+
+export function registerSendSilentContext(fn: SendSilentContextFn | null) {
+  sendSilentContextFn = fn;
+}
+
+/**
+ * Inject background context into the session WITHOUT triggering a response.
+ * Samuel receives this as conversation history he can reference when asked,
+ * but won't proactively speak about it.
+ */
+export function sendSilentContext(text: string): boolean {
+  if (!sendSilentContextFn) return false;
+  sendSilentContextFn(text);
+  return true;
 }
 
 export function registerSendTextAndRespond(fn: SendTextAndRespondFn | null) {

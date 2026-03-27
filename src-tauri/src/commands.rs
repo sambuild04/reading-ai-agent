@@ -10,6 +10,18 @@ use std::time::Instant;
 
 use crate::memory;
 
+/// Safe UTF-8 truncation — never slices in the middle of a multi-byte character.
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 static DEFAULT_DISPLAY: AtomicU32 = AtomicU32::new(1);
 
 // Holds the child process for the system audio recorder (Swift helper)
@@ -925,7 +937,7 @@ pub async fn computer_use_task(task: String) -> Result<String, String> {
     let config = read_config_internal()?;
     let api_key = config.api_key.ok_or("No API key in ~/.books-reader.json")?;
 
-    eprintln!("[cua] starting task: {}", &task[..task.len().min(120)]);
+    eprintln!("[cua] starting task: {}", truncate_str(&task, 120));
     activate_books()?;
 
     let (logical_w, logical_h) = get_logical_screen_size();
@@ -1542,10 +1554,14 @@ pub async fn check_screen_for_language(language: String) -> Result<Option<String
     }
 
     let prompt = format!(
-        "Scan this screenshot for any {language} text (subtitles, UI, articles, chat, etc). \
-         If you find {language} text, pick 1-2 interesting words or grammar patterns a learner \
-         would benefit from knowing. Give a brief, voice-friendly explanation (2-3 sentences max). \
-         If there is no {language} text visible at all, respond with exactly: NONE"
+        "Scan this screenshot for a {language} learner.\n\
+         PRIORITY 1: If you find {language} text (subtitles, UI, articles, chat), pick 1-2 interesting \
+         words or grammar patterns and explain them briefly (2-3 sentences, voice-friendly).\n\
+         PRIORITY 2: If there is NO {language} text but there IS interesting English (or other language) \
+         content — a concept, object, action, emotion, or topic visible on screen — teach how to say it \
+         in {language}. Frame it as: \"Do you know how to say [X] in {language}? It's [word/phrase] ([reading]).\"\n\
+         Pick something specific and visually prominent, not generic words like 'the' or 'button'.\n\
+         Only respond NONE if the screen is truly empty, a plain desktop, or has nothing teachable."
     );
 
     let request_body = serde_json::json!({
@@ -1555,8 +1571,9 @@ pub async fn check_screen_for_language(language: String) -> Result<Option<String
                 "role": "system",
                 "content": format!(
                     "You are a {language} language learning assistant. \
-                     You scan screenshots and highlight interesting vocabulary or grammar \
-                     for a learner. Keep responses very short and suitable for a voice assistant."
+                     You scan screenshots and highlight interesting vocabulary or grammar for a learner. \
+                     You also teach {language} equivalents of interesting non-{language} content on screen. \
+                     Keep responses very short and suitable for a voice assistant."
                 )
             },
             {
@@ -1620,7 +1637,7 @@ pub async fn check_screen_for_language(language: String) -> Result<Option<String
         .trim()
         .to_string();
 
-    eprintln!("[learning-mode] screen check result: {}", &text[..text.len().min(100)]);
+    eprintln!("[learning-mode] screen check result: {}", truncate_str(&text, 100));
 
     if text == "NONE" || text.to_uppercase().starts_with("NONE") {
         Ok(None)
@@ -1739,7 +1756,7 @@ pub async fn check_audio_for_language(language: String, duration_secs: Option<u6
         return Ok(None);
     }
 
-    eprintln!("[learning-mode] audio transcript: {}", &transcript[..transcript.len().min(120)]);
+    eprintln!("[learning-mode] audio transcript: {}", truncate_str(&transcript, 120));
 
     // Ask GPT-4o if this contains the target language and for interesting vocabulary/grammar
     let analysis_prompt = format!(
@@ -1793,7 +1810,7 @@ pub async fn check_audio_for_language(language: String, duration_secs: Option<u6
         .trim()
         .to_string();
 
-    eprintln!("[learning-mode] audio analysis: {}", &hint[..hint.len().min(100)]);
+    eprintln!("[learning-mode] audio analysis: {}", truncate_str(&hint, 100));
 
     if hint == "NONE" || hint.to_uppercase().starts_with("NONE") {
         Ok(None)
@@ -1811,6 +1828,12 @@ pub struct TriageDecision {
     pub classification: String,
     pub confidence: f64,
     pub message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AudioCheckResult {
+    pub transcript: Option<String>,
+    pub hint: Option<String>,
 }
 
 /// Detect whether the user is in deep focus, casually available, or idle.
@@ -1843,7 +1866,7 @@ pub async fn triage_observation(
     let attention = get_frontmost_app_name();
 
     // Record this observation in memory
-    let summary = format!("[{source}] {}", &observation[..observation.len().min(80)]);
+    let summary = format!("[{source}] {}", truncate_str(&observation, 80));
     memory::record_observation(&summary);
 
     let prompt = format!(
@@ -1866,10 +1889,11 @@ Decide what to do. Return JSON ONLY:
 }}
 
 Rules:
-- "ignore": Not useful. Background noise, already-taught vocabulary, generic content, not in {language}, or user already knows this.
-- "notify": Mildly interesting. A quick vocabulary reminder or common phrase. Show as subtle text card.
-- "act": Genuinely interesting and specific. A new word, unusual grammar pattern, or content directly relevant to the user's study. Worth speaking aloud.
-- Be conservative — silence (ignore) is better than interrupting needlessly.
+- "ignore": Not useful. Background noise, already-taught vocabulary, a plain empty desktop, or truly generic content (common greetings, "hello", "the", etc).
+- "notify": Mildly interesting. A vocabulary word, common phrase, or a "do you know how to say X in {language}?" moment. Show as subtle text card.
+- "act": Genuinely interesting and specific. A new word, unusual grammar, or a great cross-language teaching moment. Worth speaking aloud.
+- IMPORTANT: Observations do NOT need to be in {language} to be valuable. Teaching the {language} equivalent of interesting English content IS valuable — treat those as notify or act, not ignore.
+- Be conservative — silence (ignore) is better than interrupting needlessly, but a good cross-language teaching moment IS worth surfacing.
 - If the observation mentions words listed in "Already taught", classify as ignore.
 - Only "act" for truly specific, helpful observations."#
     );
@@ -1935,7 +1959,7 @@ Rules:
         "[triage] {} (conf={:.2}): {}",
         classification,
         confidence,
-        &message[..message.len().min(80)]
+        truncate_str(&message, 80)
     );
 
     // Record vocabulary if we're surfacing it
@@ -1974,12 +1998,14 @@ fn start_learning_audio_internal() -> Result<(), String> {
         return Ok(());
     }
     let _ = fs::remove_file(LEARNING_AUDIO_PATH);
+    // Exclude our own process so Samuel's TTS doesn't get captured
+    let my_pid = std::process::id().to_string();
     let child = Command::new(&helper)
-        .arg(LEARNING_AUDIO_PATH)
+        .args([LEARNING_AUDIO_PATH, "--exclude-pid", &my_pid])
         .stderr(std::process::Stdio::inherit())
         .spawn()
         .map_err(|e| format!("start learning audio: {e}"))?;
-    eprintln!("[learning-audio] started pid={}", child.id());
+    eprintln!("[learning-audio] started pid={} (excluding own pid={})", child.id(), my_pid);
     *guard = Some(child);
     Ok(())
 }
@@ -2025,14 +2051,16 @@ pub async fn stop_learning_audio() -> Result<(), String> {
 
 /// Stop recorder, transcribe accumulated audio, restart recorder, return hints.
 #[tauri::command]
-pub async fn check_learning_audio(language: String) -> Result<Option<String>, String> {
+pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, String> {
+    let empty = AudioCheckResult { transcript: None, hint: None };
+
     let config = read_config_internal()?;
     let api_key = config.api_key.ok_or("No API key")?;
 
     // Don't interfere with manual recording
     let is_recording = RECORDING_CHILD.lock().map(|g| g.is_some()).unwrap_or(false);
     if is_recording {
-        return Ok(None);
+        return Ok(empty);
     }
 
     // Stop recorder to finalize the file
@@ -2040,7 +2068,7 @@ pub async fn check_learning_audio(language: String) -> Result<Option<String>, St
 
     if !std::path::Path::new(LEARNING_AUDIO_PATH).exists() {
         let _ = start_learning_audio_internal();
-        return Ok(None);
+        return Ok(empty);
     }
 
     let size = fs::metadata(LEARNING_AUDIO_PATH).map(|m| m.len()).unwrap_or(0);
@@ -2048,7 +2076,7 @@ pub async fn check_learning_audio(language: String) -> Result<Option<String>, St
         let _ = fs::remove_file(LEARNING_AUDIO_PATH);
         let _ = start_learning_audio_internal();
         eprintln!("[learning-audio] clip too small ({size}B)");
-        return Ok(None);
+        return Ok(empty);
     }
 
     eprintln!("[learning-audio] clip: {:.1}KB, transcribing...", size as f64 / 1024.0);
@@ -2072,7 +2100,7 @@ pub async fn check_learning_audio(language: String) -> Result<Option<String>, St
     let _ = start_learning_audio_internal();
 
     if !whisper_output.status.success() {
-        return Ok(None);
+        return Ok(empty);
     }
 
     let whisper_body: serde_json::Value =
@@ -2085,16 +2113,23 @@ pub async fn check_learning_audio(language: String) -> Result<Option<String>, St
 
     if transcript.is_empty() || transcript.len() < 5 {
         eprintln!("[learning-audio] no speech detected");
-        return Ok(None);
+        return Ok(empty);
     }
 
-    eprintln!("[learning-audio] transcript: {}", &transcript[..transcript.len().min(120)]);
+    eprintln!("[learning-audio] transcript: {}", truncate_str(&transcript, 120));
+
+    // Store raw transcript in memory so Samuel can reference it
+    memory::record_transcript(&transcript);
 
     let analysis_prompt = format!(
-        "You heard the following audio transcript. If it contains {language} speech, \
-         pick 1-2 interesting words or grammar patterns a {language} learner would benefit \
-         from knowing. Brief, voice-friendly explanation (2-3 sentences max). \
-         If NOT in {language} or just noise/music/English, respond exactly: NONE\n\n\
+        "You heard the following audio transcript. Help a {language} learner.\n\
+         PRIORITY 1: If it contains {language} speech, pick 1-2 interesting words or grammar \
+         patterns and explain them briefly (2-3 sentences, voice-friendly).\n\
+         PRIORITY 2: If the speech is in English (or another non-{language} language), find an \
+         interesting word, phrase, or concept mentioned and teach the {language} equivalent. \
+         Frame it as: \"I heard [X] — in {language} that's [word/phrase] ([reading]).\"\n\
+         Pick something specific and contextual, not trivial words.\n\
+         Only respond NONE if the transcript is just noise, music with no lyrics, or too short to be useful.\n\n\
          Transcript: {transcript}"
     );
 
@@ -2125,7 +2160,8 @@ pub async fn check_learning_audio(language: String) -> Result<Option<String>, St
         .map_err(|e| format!("curl gpt: {e}"))?;
 
     if !gpt_output.status.success() {
-        return Ok(None);
+        // Still return the transcript even if hint analysis fails
+        return Ok(AudioCheckResult { transcript: Some(transcript), hint: None });
     }
 
     let gpt_body: serde_json::Value =
@@ -2137,11 +2173,13 @@ pub async fn check_learning_audio(language: String) -> Result<Option<String>, St
         .trim()
         .to_string();
 
-    eprintln!("[learning-audio] hint: {}", &hint[..hint.len().min(100)]);
+    eprintln!("[learning-audio] hint: {}", truncate_str(&hint, 100));
 
-    if hint == "NONE" || hint.to_uppercase().starts_with("NONE") {
-        Ok(None)
+    let hint_val = if hint == "NONE" || hint.to_uppercase().starts_with("NONE") {
+        None
     } else {
-        Ok(Some(hint))
-    }
+        Some(hint)
+    };
+
+    Ok(AudioCheckResult { transcript: Some(transcript), hint: hint_val })
 }

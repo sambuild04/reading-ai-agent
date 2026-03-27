@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { RealtimeSession } from "@openai/agents/realtime";
 import { samuelAgent } from "../lib/samuel";
-import { registerSendImage, registerSendText, registerScreenTarget, registerSendTextAndRespond } from "../lib/session-bridge";
+import { registerSendImage, registerSendText, registerScreenTarget, registerSendSilentContext, registerSendTextAndRespond } from "../lib/session-bridge";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 
@@ -11,6 +11,16 @@ export interface TranscriptEntry {
   role: "user" | "assistant" | "status";
   text: string;
   timestamp: number;
+}
+
+// Session keepalive & rotation constants
+const HEARTBEAT_INTERVAL_MS = 30_000; // ping every 30s to prevent server-side idle timeout
+const SESSION_ROTATION_MS = 25 * 60 * 1000; // reconnect every 25 min (before 60-min hard cap)
+const CONTEXT_WINDOW_TURNS = 6; // carry this many turns across reconnections
+
+interface ConversationTurn {
+  role: "user" | "assistant";
+  text: string;
 }
 
 export interface UseRealtimeReturn {
@@ -87,6 +97,14 @@ export function useRealtime(): UseRealtimeReturn {
 
   const sessionRef = useRef<RealtimeSession | null>(null);
 
+  // Conversation context buffer — carried across reconnections
+  const contextRef = useRef<ConversationTurn[]>([]);
+
+  // Timers for keepalive and session rotation
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const rotationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isRotatingRef = useRef(false);
+
   // Streaming assistant buffer
   const assistantBufferRef = useRef("");
   const assistantEntryIdRef = useRef<string | null>(null);
@@ -127,20 +145,28 @@ export function useRealtime(): UseRealtimeReturn {
     }
   };
 
-  const startInactivityTimer = () => {
-    clearInactivityTimer();
-    // Longer timeout after the greeting — give the user time to listen and respond
-    const isFirstExchange = agentResponseCountRef.current <= 1;
-    const timeout = isFirstExchange ? 15_000 : 6_000;
-    inactivityTimerRef.current = setTimeout(() => {
-      if (suppressIdleRef.current) return;
-      if (wakeWordModeRef.current && sessionRef.current) {
-        try { sessionRef.current.mute(true); } catch {}
-        setIsMuted(true);
-        setAgentState("idle");
-      }
-    }, timeout);
-  };
+  // No client-side inactivity timer — once awake, Samuel stays listening.
+  const startInactivityTimer = () => {};
+
+  const stopKeepalive = useCallback(() => {
+    if (heartbeatRef.current) {
+      clearInterval(heartbeatRef.current);
+      heartbeatRef.current = null;
+    }
+    if (rotationTimerRef.current) {
+      clearTimeout(rotationTimerRef.current);
+      rotationTimerRef.current = null;
+    }
+  }, []);
+
+  // Record a conversation turn into the rolling context buffer
+  const recordTurn = useCallback((role: "user" | "assistant", text: string) => {
+    if (!text.trim()) return;
+    contextRef.current.push({ role, text });
+    if (contextRef.current.length > CONTEXT_WINDOW_TURNS) {
+      contextRef.current = contextRef.current.slice(-CONTEXT_WINDOW_TURNS);
+    }
+  }, []);
 
   useEffect(() => {
     const session = new RealtimeSession(samuelAgent, {
@@ -268,6 +294,7 @@ export function useRealtime(): UseRealtimeReturn {
             break;
           }
 
+          recordTurn("user", text);
           if (pendingId) {
             setTranscript((prev) =>
               prev.map((e) => (e.id === pendingId ? { ...e, text } : e)),
@@ -307,6 +334,7 @@ export function useRealtime(): UseRealtimeReturn {
           const finalText = event.transcript as string;
           if (finalText) {
             lastAgentTextRef.current = finalText;
+            recordTurn("assistant", finalText);
             if (assistantEntryIdRef.current) {
               const id = assistantEntryIdRef.current;
               setTranscript((prev) =>
@@ -361,9 +389,23 @@ export function useRealtime(): UseRealtimeReturn {
 
         case "session.closed":
         case "close": {
-          console.log("[session] transport closed");
-          setStatus("disconnected");
-          setAgentState("idle");
+          stopKeepalive();
+          if (isRotatingRef.current) {
+            // Planned rotation — reconnect() handles the rest
+            console.log("[session] planned rotation close");
+          } else {
+            // Unexpected drop — auto-reconnect if we were connected
+            console.log("[session] transport closed unexpectedly, will auto-reconnect");
+            setStatus("disconnected");
+            setAgentState("idle");
+            // Auto-reconnect after a short delay
+            setTimeout(() => {
+              if (sessionRef.current) {
+                console.log("[session] auto-reconnecting...");
+                connectRef.current?.();
+              }
+            }, 2000);
+          }
           break;
         }
 
@@ -409,6 +451,19 @@ export function useRealtime(): UseRealtimeReturn {
       });
     });
 
+    // Silent context: inject background info Samuel can reference but won't speak about
+    registerSendSilentContext((text: string) => {
+      session.transport.sendEvent({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text }],
+        },
+      });
+      // No response.create — Samuel absorbs the context silently
+    });
+
     // Bridge for learning mode: inject a system hint and trigger Samuel to respond
     registerSendTextAndRespond((text: string) => {
       session.transport.sendEvent({
@@ -426,25 +481,32 @@ export function useRealtime(): UseRealtimeReturn {
       registerSendImage(null);
       registerSendText(null);
       registerScreenTarget(null);
+      registerSendSilentContext(null);
       registerSendTextAndRespond(null);
+      stopKeepalive();
       session.close();
       sessionRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const connectRef = useRef<(() => Promise<void>) | null>(null);
+
   const connect = useCallback(async () => {
-    if (status === "connected") return;
-    // If the previous session died (server timeout), close it cleanly
-    // so the SDK lets us reconnect.
-    if (sessionRef.current) {
-      try { sessionRef.current.close(); } catch {}
-    }
+    if (status === "connected" && !isRotatingRef.current) return;
+    stopKeepalive();
+
     const session = sessionRef.current;
     if (!session) return;
 
+    // If previous session died or rotating, close it cleanly
+    try { session.close(); } catch {}
+
+    const isReconnect = contextRef.current.length > 0;
     setStatus("connecting");
-    setTranscript([makeEntry("status", "Connecting...")]);
+    if (!isReconnect) {
+      setTranscript([makeEntry("status", "Connecting...")]);
+    }
 
     try {
       const ephemeralKey = await invoke<string>("create_ephemeral_key");
@@ -452,28 +514,71 @@ export function useRealtime(): UseRealtimeReturn {
 
       setStatus("connected");
       setAgentState("listening");
-      setTranscript([makeEntry("status", "Connected")]);
+      isRotatingRef.current = false;
 
-      // Reset response counter and pre-mute before greeting so the mic
-      // can't pick up the very start of Samuel's voice.
       agentResponseCountRef.current = 0;
       session.mute(true);
 
-      // Inject local time so Samuel's greeting is time-appropriate
-      const now = new Date();
-      const timeCtx = `[System: Current local time is ${now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })} on ${now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}. Use this for a time-appropriate greeting.]`;
-      session.transport.sendEvent({
-        type: "conversation.item.create",
-        item: {
-          type: "message",
-          role: "user",
-          content: [{ type: "input_text", text: timeCtx }],
-        },
-      });
+      if (isReconnect) {
+        // Replay context so Samuel remembers the conversation
+        const turns = contextRef.current.slice(-CONTEXT_WINDOW_TURNS);
+        for (const turn of turns) {
+          session.transport.sendEvent({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: turn.role,
+              content: [{ type: "input_text", text: turn.text }],
+            },
+          });
+        }
+        console.log(`[session] restored ${turns.length} context turns`);
+        setTranscript((prev) => [...prev, makeEntry("status", "Session refreshed")]);
 
-      session.transport.sendEvent({ type: "response.create" });
+        // Don't re-greet — just unmute after a short delay
+        setTimeout(() => {
+          if (!userMutedRef.current && sessionRef.current) {
+            try { sessionRef.current.mute(false); } catch {}
+          }
+        }, 500);
+      } else {
+        setTranscript([makeEntry("status", "Connected")]);
+
+        // Inject local time so Samuel's greeting is time-appropriate
+        const now = new Date();
+        const timeCtx = `[System: Current local time is ${now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })} on ${now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}. Use this for a time-appropriate greeting.]`;
+        session.transport.sendEvent({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: timeCtx }],
+          },
+        });
+        session.transport.sendEvent({ type: "response.create" });
+      }
+
+      // Start heartbeat — keeps the Realtime API connection alive during silence
+      heartbeatRef.current = setInterval(() => {
+        if (sessionRef.current) {
+          try {
+            sessionRef.current.transport.sendEvent({ type: "session.update", session: {} });
+          } catch {
+            console.warn("[heartbeat] failed to send ping");
+          }
+        }
+      }, HEARTBEAT_INTERVAL_MS);
+
+      // Schedule session rotation before the 60-min hard cap
+      rotationTimerRef.current = setTimeout(() => {
+        console.log("[session] planned rotation at 25 min");
+        isRotatingRef.current = true;
+        connectRef.current?.();
+      }, SESSION_ROTATION_MS);
+
     } catch (err) {
       console.error("[connect]", err);
+      isRotatingRef.current = false;
       setTranscript((prev) => [
         ...prev,
         makeEntry("status", `Connection failed: ${err}`),
@@ -481,9 +586,14 @@ export function useRealtime(): UseRealtimeReturn {
       setStatus("disconnected");
       setAgentState("idle");
     }
-  }, [status]);
+  }, [status, stopKeepalive, recordTurn]);
+
+  // Keep connectRef current so auto-reconnect and rotation can call it
+  connectRef.current = connect;
 
   const disconnect = useCallback(() => {
+    stopKeepalive();
+    contextRef.current = [];
     registerSendImage(null);
     registerScreenTarget(null);
     sessionRef.current?.close();
@@ -492,7 +602,7 @@ export function useRealtime(): UseRealtimeReturn {
     setIsMuted(false);
     userMutedRef.current = false;
     setTranscript((prev) => [...prev, makeEntry("status", "Disconnected.")]);
-  }, []);
+  }, [stopKeepalive]);
 
   const mute = useCallback((muted: boolean) => {
     const session = sessionRef.current;

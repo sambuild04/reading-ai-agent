@@ -4,12 +4,28 @@ import Foundation
 import ScreenCaptureKit
 
 // ScreenCaptureKit system audio recorder.
-// Captures all system audio (excluding this process) to an M4A file.
+// Captures system audio to an M4A file, optionally excluding specific processes.
+// Usage: record-audio [output-path] [--exclude-pid PID ...]
 // Runs until SIGTERM/SIGINT is received, then finalizes and exits.
 
-let outputPath = CommandLine.arguments.count > 1
-    ? CommandLine.arguments[1]
-    : "/tmp/samuel-recording.m4a"
+var outputPath = "/tmp/samuel-recording.m4a"
+var excludePIDs: [Int32] = []
+
+// Parse arguments: first positional arg is output path, --exclude-pid <PID> pairs follow
+var i = 1
+while i < CommandLine.arguments.count {
+    let arg = CommandLine.arguments[i]
+    if arg == "--exclude-pid", i + 1 < CommandLine.arguments.count,
+       let pid = Int32(CommandLine.arguments[i + 1]) {
+        excludePIDs.append(pid)
+        i += 2
+    } else if !arg.hasPrefix("--") {
+        outputPath = arg
+        i += 1
+    } else {
+        i += 1
+    }
+}
 
 let outputURL = URL(fileURLWithPath: outputPath)
 
@@ -42,7 +58,18 @@ class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
         config.height = 2
         config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
 
-        let filter = SCContentFilter(display: display, excludingWindows: [])
+        // Filter out excluded processes (e.g. Samuel's TTS) so we only capture external audio
+        let excludedApps = content.applications.filter { app in
+            excludePIDs.contains(app.processID)
+        }
+        let filter: SCContentFilter
+        if excludedApps.isEmpty {
+            filter = SCContentFilter(display: display, excludingWindows: [])
+        } else {
+            let names = excludedApps.map { $0.applicationName }.joined(separator: ", ")
+            fputs("[record-audio] excluding \(excludedApps.count) app(s): \(names)\n", stderr)
+            filter = SCContentFilter(display: display, excludingApplications: excludedApps, exceptingWindows: [])
+        }
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
 
         // Use dedicated queue, not main (main run loop must stay free)
