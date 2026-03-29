@@ -1,24 +1,28 @@
-# Samuel — Your AI That Watches, Listens, and Teaches You in Real Time
+# Samuel — AI That Watches Your Screen and Teaches You by Voice in Real Time
 
-> An ambient AI desktop agent that floats on your screen like a virtual pet. It watches what you watch. It hears what you hear. Then it teaches you — vocabulary, grammar, pronunciation — in real time, from whatever content you're already consuming. No flashcards. No apps. Just say "Hey Samuel."
+> A real-time voice AI tutor that lives on your desktop. It sees your screen, hears your audio, and teaches you vocabulary, grammar, and pronunciation — out loud, by voice — while you watch anime, browse the web, or read a book. No typing. No flashcards. Just say "Hey Samuel."
 
-![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![macOS](https://img.shields.io/badge/platform-macOS-black.svg)
 ![Tauri v2](https://img.shields.io/badge/Tauri-v2-orange.svg)
-![OpenAI Realtime API](https://img.shields.io/badge/OpenAI-Realtime%20API-412991.svg)
+![OpenAI Realtime API](https://img.shields.io/badge/OpenAI-Realtime%20Voice-412991.svg)
 ![Stars](https://img.shields.io/github/stars/sambuild04/reading-ai-agent?style=social)
+
+**Keywords:** AI language tutor, real-time voice teaching, learn Japanese while watching anime, AI desktop pet, ambient learning agent, OpenAI Realtime API voice agent, screen-aware AI, Tauri desktop app, voice-first AI assistant, learn languages from video
+
+---
 
 ## See It In Action
 
 https://github.com/user-attachments/assets/65314d07-694d-47c5-8209-24e5bdbdf55c
 
-### Real-Time Teaching — Learn While You Watch
+### Real-Time Voice Teaching — He Speaks to You While You Watch
 
-![Samuel watches anime and teaches Japanese vocabulary from subtitles and dialogue in real time](docs/samuel-learning-mode.gif)
+![Samuel watches anime and teaches Japanese vocabulary by voice in real time](docs/samuel-learning-mode.gif)
 
-Samuel sits on your desktop, transparent and unobtrusive. While you watch a video, he **reads the subtitles and listens to the dialogue simultaneously**, then teaches you what the words mean — all by voice, without you doing anything.
+You're watching a video. Samuel sees the subtitles, hears the dialogue, and **speaks to you by voice**: "食べる — 'to eat', sir." You don't press anything. You don't look away from the video. He just tells you.
 
-Ask "what did they just say?" and he answers instantly, because he was already listening.
+Ask "what did they just say?" and he answers instantly — because he was already listening.
 
 ---
 
@@ -28,131 +32,143 @@ You want to learn a language. You download Duolingo. You do it for a week. You s
 
 Meanwhile, you watch 3 hours of anime, K-dramas, or YouTube every day — content **in** the language you want to learn — and retain nothing because there's no one sitting next to you explaining what the words mean.
 
-**Samuel is that person.**
+**Samuel is that person.** Except he speaks to you in real time, by voice, hands-free.
 
-He watches with you. He listens with you. And every time something interesting comes up, he tells you what it means — in his voice, as a brief aside, without pausing the video. If you already know a word, tell him, and he'll never mention it again. He remembers your level and adapts.
+---
+
+## How Samuel Teaches You (By Voice, In Real Time)
+
+Samuel doesn't send you text notifications or flashcards. He **talks to you**:
+
+1. You watch a video with Japanese subtitles
+2. Samuel sees "取得していること" on your screen and hears the audio
+3. He speaks: *"取得 — 'to acquire', sir. This is a formal requirement pattern."*
+4. You keep watching. 20 seconds later, he catches another word.
+5. You say "what did they just say?" — he heard the whole clip and tells you
+
+All voice. All real time. Zero interruption to your workflow.
+
+### Highlight Any Word — He Reads Your Selection
+
+See a word you don't understand? **Highlight it.** Say "what's this word?" Samuel reads your exact text selection from the clipboard — no guessing from screenshots — and teaches you the meaning, reading, and usage by voice.
+
+### He Remembers What You Know
+
+Tell Samuel "I already know that" and he **permanently** stops teaching that word. Tell him "I'm intermediate" and he skips beginner content. His memory persists across sessions — he adapts to your level over time.
 
 ---
 
 ## What Makes Samuel Different
 
-| Feature | Traditional apps | Samuel |
-|---|---|---|
-| Content source | App-provided exercises | **Whatever you're already watching, reading, or browsing** |
-| Input method | Typing / tapping | **Voice — hands-free** |
-| Teaching trigger | You open the app | **Automatic — he notices content on your screen** |
-| Availability | In-app only | **Always on your desktop** |
-| Memory | Per-session | **Persistent — remembers what you know across sessions** |
-| Interruption model | Push notifications | **Attention-aware — stays silent when you're focused** |
+| | Duolingo / Busuu / Anki | ChatGPT / Gemini | **Samuel** |
+|---|---|---|---|
+| **Teaches by voice** | No | Text only | **Yes — real-time speech** |
+| **Watches your screen** | No | No | **Yes — sees subtitles, web pages, books** |
+| **Listens to audio** | No | No | **Yes — hears video dialogue, podcasts** |
+| **Teaches from YOUR content** | No (app exercises) | Only if you paste it | **Automatic — whatever is on screen** |
+| **Hands-free** | No | No | **Yes — "Hey Samuel" wake word** |
+| **Remembers your level** | Per-app only | Per-session | **Permanent adaptive memory** |
+| **Always available** | Must open app | Must open tab | **Floats on desktop 24/7** |
 
 ---
 
 ## Key Features
 
-### Ambient Learning Agent
-Samuel runs a continuous perception loop every 20 seconds:
-
-1. **Captures your screen** via GPT-4o Vision (with perceptual change detection — skips if nothing changed)
-2. **Transcribes system audio** via ScreenCaptureKit (with PID filtering to exclude his own voice)
-3. **Triages both** through GPT-4o-mini to decide: ignore, show a hint card, or speak
-4. **Injects everything as silent context** into his conversation memory — so when you ask questions, he knows what happened
-
-This means Samuel is always aware of what you're doing, but only speaks up when it's worth it.
+### Real-Time Voice Teaching Engine
+- **Speaks to you** — not text, not notifications. Actual voice output via OpenAI Realtime API (WebRTC, <500ms latency)
+- **"Hey Samuel" wake word** — detected locally via Whisper. Always listening, like Siri
+- **Continuous perception loop** — every 20 seconds: captures screen (GPT-4o Vision) + transcribes system audio (ScreenCaptureKit) → triage engine decides whether to speak
+- **Silent context absorption** — even when Samuel doesn't speak, he's absorbing what's happening. Ask him about it anytime
 
 ### Persistent Adaptive Memory
-- Tracks every word he's taught you — won't repeat it for 24 hours
-- **Permanently remembers** words you mark as known — they never come back
-- Stores your proficiency level, study goals, and preferences across sessions
-- Adapts teaching difficulty based on what you know
-- All stored locally in `~/.samuel/memory.json`
+- Tracks every word taught — 24-hour cooldown, no repeats
+- **Permanently remembers** words you mark as known
+- Stores proficiency level, study goals, preferences across sessions
+- Adapts difficulty: tell him "skip basic stuff" and he does, forever
+- Local storage in `~/.samuel/memory.json`
 
-### Voice-First Interaction
-- **"Hey Samuel" wake word** — detected locally via Whisper, no cloud VAD
-- **Real-time voice conversation** via OpenAI Realtime API (WebRTC)
-- **Session resilience** — heartbeat keepalive, 25-min rotation, auto-reconnect with 6-turn context replay
-- British butler persona — concise, polished, never annoying
+### Highlight-to-Learn
+- **Reads your exact text selection** via clipboard — no Vision API guessing
+- Highlight any word on any webpage → "what's this word?" → instant voice explanation
+- Works in Chrome, Safari, Firefox, any app with selectable text
 
 ### Works With Any Content
-- **Videos** — anime, K-dramas, YouTube, Netflix, lectures
-- **Books** — reads Apple Books pages aloud, navigates chapters visually via GPT-5.4 Computer Use
-- **Websites** — notices foreign text (or teaches target language equivalents of English content)
-- **Podcasts and calls** — transcribes system audio and answers questions about what was said
-- **Multi-monitor** — "look at my Chrome" captures the right window on any display
+- **Anime / K-dramas / YouTube** — hears dialogue, reads subtitles, teaches vocabulary
+- **Apple Books** — reads pages aloud, navigates chapters via GPT-5.4 Computer Use
+- **Websites** — sees foreign text or teaches target language equivalents of English content
+- **Podcasts / Zoom calls** — transcribes system audio, answers questions about what was said
+- **Multi-monitor** — "look at my Chrome" captures the right window across displays
 
 ### Any Language
-Japanese, Chinese, Korean, Spanish, French, German, Portuguese, Arabic, Russian, Thai, Vietnamese, Hindi — say "I'm learning [language]" and Samuel adapts everything.
+Japanese, Chinese, Korean, Spanish, French, German, Portuguese, Arabic, Russian, Thai, Vietnamese, Hindi — say "I'm learning [language]" and everything adapts.
 
----
-
-## How It Works
-
-```
-Microphone → "Hey Samuel" wake word → OpenAI Realtime API → Tools → Voice response
-                                              ↕
-               Always watching screen (GPT-4o Vision, 20s cycle)
-               Always listening to audio (ScreenCaptureKit, 20s cycle)
-               Triage engine decides what's worth mentioning
-               Silent context injection — Samuel remembers everything
-```
-
-| What you say | What Samuel does |
-|---|---|
-| "Read this page" | Captures Apple Books page as image, reads it aloud |
-| "Summarize chapter 9" | Reads every page via Vision until next chapter |
-| "Go to chapter 6" | GPT-5.4 Computer Use navigates the UI visually |
-| "Look at my Chrome" | Finds Chrome on any monitor, captures it |
-| "Translate my screen" | Translates all visible foreign text with readings |
-| "Explain this grammar" | Breaks down particles, conjugation, sentence structure |
-| "How do you say 'cat'?" | Pronounces it in your target language with accent tips |
-| "Start recording" | Records system audio for deep language analysis |
-| "I'm learning Spanish" | Activates ambient learning for Spanish |
-| "What did they just say?" | References ambient audio buffer to answer |
-| "I already know that word" | Marks it as permanently known — never mentioned again |
+### Session Resilience
+- Heartbeat keepalive (30s pings) — no silent disconnects
+- Auto-rotation every 25 min before the 60-min hard cap
+- 6-turn context replay on reconnect — Samuel remembers the conversation
+- Auto-reconnect on unexpected drops (2s recovery)
 
 ---
 
 ## Architecture
 
 ```
-src/                          React frontend (Vite + TypeScript)
-├── App.tsx                   Main app + wake word activation flow
-├── hooks/
-│   ├── useRealtime.ts        Realtime API: heartbeat, reconnect, context replay
-│   ├── useWakeWord.ts        "Hey Samuel" detection via Whisper
-│   ├── useRecordMode.ts      System audio recording + analysis pipeline
-│   └── useLearningMode.ts    Ambient agent: parallel screen+audio, triage, silent context
-├── lib/
-│   ├── samuel.ts             Agent persona, 17 tools, adaptive memory instructions
-│   ├── session-bridge.ts     Bridges: image injection, silent context, recording, learning
-│   └── sounds.ts             Audio cues (chime on wake, tone on idle)
-├── components/
-│   ├── Character.tsx          Rive animation + manga-style speech bubbles
-│   ├── PassiveSuggestion.tsx  Frosted-glass hint cards for ambient observations
-│   ├── ScreenPicker.tsx       Multi-monitor display selector
-│   └── StatusBar.tsx          Connection state indicator
-└── styles/app.css             Transparent window + animations
-
-src-tauri/                    Rust backend (Tauri v2)
-├── helpers/
-│   └── record-audio.swift    ScreenCaptureKit capture with PID-level process filtering
-└── src/
-    ├── lib.rs                Tauri setup + macOS transparent window (Cocoa)
-    ├── commands.rs           Screen capture, Vision API, Computer Use, triage engine,
-    │                         audio pipeline, ephemeral keys, display detection
-    ├── memory.rs             Persistent adaptive memory: vocab, facts, transcripts
-    └── wake_word.rs          Whisper wake word with cross-clip matching
+You speak → "Hey Samuel" wake word → OpenAI Realtime API → 12 tools → Voice response
+                                              ↕
+               Always watching screen (GPT-4o Vision, change detection)
+               Always listening to audio (ScreenCaptureKit, PID filtering)
+               Triage engine: ignore / hint card / speak aloud
+               Silent context injection — Samuel remembers everything
 ```
 
-### Models Used
+| What you say | What Samuel does |
+|---|---|
+| "Read this page" | Captures Apple Books page, reads it aloud by voice |
+| "Summarize chapter 9" | Auto-turns pages, reads entire chapter via Vision |
+| "Go to chapter 6" | GPT-5.4 Computer Use clicks through the UI |
+| "Look at my Chrome" | Finds Chrome on any monitor, captures and describes |
+| "Translate my screen" | Translates all visible foreign text with readings |
+| "What's this word I'm highlighting?" | Reads exact clipboard selection, teaches by voice |
+| "How do you say 'cat'?" | Pronounces it in your target language |
+| "Start recording" | Records system audio for deep analysis |
+| "I'm learning Spanish" | Activates ambient voice teaching for Spanish |
+| "What did they just say?" | References ambient audio buffer to answer |
+| "I already know that" | Permanently suppresses that word |
+
+### Models (6-model orchestration)
 
 | Model | Purpose | Latency |
 |---|---|---|
-| **OpenAI Realtime API** | Voice conversation, reading, translation | ~2s |
-| **GPT-4o Vision** | Screen analysis, ambient observation | ~3-5s |
+| **OpenAI Realtime API** | Voice conversation, teaching, reading | ~500ms |
+| **GPT-4o Vision** | Screen scanning, ambient observation | ~3-5s |
 | **GPT-4o-mini** | Triage classification (ignore/notify/act) | ~1s |
-| **GPT-5.4 Computer Use** | Visual UI navigation (click, scroll, type) | ~5-10s/turn |
-| **gpt-4o-mini-transcribe** | Wake word + ambient audio transcription | ~1s |
-| **gpt-4o-transcribe** | Recording mode (high-fidelity transcription) | ~3-10s |
+| **GPT-5.4 Computer Use** | Visual UI navigation | ~5-10s/turn |
+| **gpt-4o-mini-transcribe** | Wake word + ambient audio | ~1s |
+| **gpt-4o-transcribe** | Recording mode (high-fidelity) | ~3-10s |
+
+```
+src/                          React frontend (Vite + TypeScript)
+├── hooks/
+│   ├── useRealtime.ts        Realtime voice: heartbeat, reconnect, context replay
+│   ├── useWakeWord.ts        "Hey Samuel" detection via Whisper
+│   ├── useRecordMode.ts      System audio recording + analysis
+│   └── useLearningMode.ts    Ambient agent: parallel screen+audio, triage, silent context
+├── lib/
+│   ├── samuel.ts             Agent: 12 consolidated tools, adaptive memory, voice persona
+│   └── session-bridge.ts     Bridges: image, silent context, recording, learning
+├── components/
+│   ├── Character.tsx          Rive animation + manga speech bubbles
+│   └── PassiveSuggestion.tsx  Frosted-glass hint cards
+└── styles/app.css             Transparent window, animations
+
+src-tauri/                    Rust backend (Tauri v2)
+├── helpers/
+│   └── record-audio.swift    ScreenCaptureKit with PID-level process filtering
+└── src/
+    ├── commands.rs           Screen capture, Vision, Computer Use, triage, audio, clipboard
+    ├── memory.rs             Persistent adaptive memory: vocab, facts, proficiency
+    └── wake_word.rs          Whisper wake word with cross-clip matching
+```
 
 ---
 
@@ -164,11 +180,12 @@ src-tauri/                    Rust backend (Tauri v2)
 | Frontend | React 19 + Vite + TypeScript |
 | Voice | [OpenAI Realtime API](https://platform.openai.com/docs/guides/realtime) (WebRTC) |
 | Agent Framework | [`@openai/agents`](https://github.com/openai/openai-agents-js) |
-| Vision | GPT-4o Vision API |
+| Vision | GPT-4o Vision |
 | Computer Use | GPT-5.4 Responses API |
 | Animation | [Rive](https://rive.app) |
 | Screen Capture | [Peekaboo](https://github.com/nicklama/peekaboo) + macOS `screencapture` |
-| System Audio | ScreenCaptureKit (Swift) with process-level filtering |
+| Audio Capture | ScreenCaptureKit (Swift) with process-level filtering |
+| Text Selection | Clipboard bridge (Cmd+C → pbpaste → restore) |
 | Window Transparency | Cocoa NSWindow via `macos-private-api` |
 
 ---
@@ -183,25 +200,19 @@ src-tauri/                    Rust backend (Tauri v2)
 ### Install
 
 ```bash
-# Install Peekaboo for screen capture
 brew install steipete/tap/peekaboo
 
-# Clone and install
 git clone https://github.com/sambuild04/reading-ai-agent.git
 cd reading-ai-agent
 npm install
 
-# Compile the audio capture helper
 swiftc -o src-tauri/helpers/record-audio src-tauri/helpers/record-audio.swift \
   -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia
 
-# Set your API key
 echo '{"apiKey": "sk-..."}' > ~/.books-reader.json
 
-# Grant Screen Recording permission
-# System Settings → Privacy & Security → Screen Recording → add peekaboo + samuel
+# Grant Screen Recording: System Settings → Privacy & Security → Screen Recording → add peekaboo + samuel
 
-# Run
 npm run tauri:dev
 ```
 
@@ -211,18 +222,20 @@ Say **"Hey Samuel"** and start learning.
 
 ## API Costs
 
-- Wake word detection: ~$0.006/min
-- Ambient learning mode: ~$0.02–0.05/min (Vision + transcription + triage)
-- Book reading: ~$0.01/page
-- Voice conversation: standard Realtime API pricing
+| Mode | Cost |
+|---|---|
+| Wake word (always listening) | ~$0.006/min |
+| Ambient teaching (screen + audio + triage) | ~$0.02–0.05/min |
+| Book reading | ~$0.01/page |
+| Voice conversation | Standard Realtime API pricing |
 
 ---
 
 ## Limitations
 
-- **macOS only** — uses Apple Books, Peekaboo, ScreenCaptureKit
+- **macOS only** — relies on Apple Books, Peekaboo, ScreenCaptureKit
 - **DRM content** — protected books may produce black screenshots
-- **GPT-5.4 access required** — for Computer Use navigation features
+- **GPT-5.4 access** — required for Computer Use navigation
 - **Copyright** — Vision API may decline to transcribe copyrighted text verbatim
 
 ---
@@ -230,17 +243,17 @@ Say **"Hey Samuel"** and start learning.
 ## Roadmap
 
 - Local on-device wake word (zero-cost, instant activation)
-- Custom AI-generated companion characters
+- Pre-routing classifier (GPT-4o-mini intent classification before tool selection)
+- Custom AI-generated companion characters via Rive
 - Anki flashcard export from learned vocabulary
 - iOS / Android companion app
 - Plugin system for custom tools and behaviors
-- Multi-language simultaneous learning
 
 ---
 
 ## Contributing
 
-Samuel is a solo project, but the ambient agent pattern has a lot of unexplored potential. Issues and PRs welcome.
+Samuel is a solo project, but the ambient voice teaching pattern has a lot of unexplored potential. Issues and PRs welcome.
 
 ## License
 

@@ -209,25 +209,16 @@ const interactWithBookTool = tool({
   },
 });
 
-const nextPageTool = tool({
-  name: "next_page",
-  description: "Quick shortcut: flip one page forward in Apple Books.",
-  parameters: z.object({}),
-  async execute() {
+const turnPageTool = tool({
+  name: "turn_page",
+  description: "Flip one page forward or backward in Apple Books.",
+  parameters: z.object({
+    direction: z.enum(["next", "prev"]).describe("'next' = forward one page, 'prev' = backward one page"),
+  }),
+  async execute({ direction }) {
     await invoke("focus_book");
-    await invoke("next_page");
-    return "Turned to next page.";
-  },
-});
-
-const prevPageTool = tool({
-  name: "prev_page",
-  description: "Quick shortcut: flip one page backward in Apple Books.",
-  parameters: z.object({}),
-  async execute() {
-    await invoke("focus_book");
-    await invoke("prev_page");
-    return "Turned to previous page.";
+    await invoke(direction === "next" ? "next_page" : "prev_page");
+    return `Turned to ${direction} page.`;
   },
 });
 
@@ -236,85 +227,37 @@ const prevPageTool = tool({
 // ---------------------------------------------------------------------------
 
 // Captures the user's focused window (any app) and injects into the session.
-const viewScreenTool = tool({
-  name: "view_screen",
+const observeScreenTool = tool({
+  name: "observe_screen",
   description:
-    "Capture a window or display on the user's screen and show it to you as an image. " +
-    "Use this when the user asks you to look at their screen, translate something they're viewing, " +
-    "explain text on screen, or help with language learning from any content on their display. " +
-    "If the user mentions a specific app (e.g. 'look at my Chrome'), pass app_name.",
+    "Your ONE tool for looking at the user's screen. Pick the right mode:\n" +
+    "- 'full' (DEFAULT): Capture a screenshot. Use for: look at screen, translate, grammar, " +
+    "how many items, what level, summarize, count, explain, any question about page content.\n" +
+    "- 'selection': Read exact highlighted text. ONLY when user says 'highlighting' or 'selected'.\n" +
+    "When in doubt, use 'full'. It always works.",
   parameters: z.object({
+    mode: z.enum(["full", "selection"]).describe(
+      "'full' = screenshot (DEFAULT for most questions). 'selection' = read highlighted text.",
+    ),
     app_name: z.string().optional().describe(
-      "Name of the app to capture, e.g. 'Chrome', 'Safari', 'Firefox'. " +
-      "Extract from user speech like 'look at my Chrome'. Omit to use the default display.",
+      "Only for mode='full'. App to capture, e.g. 'Chrome'. Omit for auto-detection.",
     ),
   }),
-  async execute({ app_name }) {
-    await sleep(200);
-    const result = await invoke<CaptureResult>("capture_active_window", { appName: app_name ?? null });
-    sendImageToSession(result.base64);
-    notifyScreenTarget(result.app_name);
-    return `I've captured the user's screen (${result.app_name}). The screenshot is now visible to you — look at it and respond to the user's request.`;
-  },
-});
+  async execute({ mode, app_name }) {
+    if (mode === "selection") {
+      const text = await invoke<string>("get_selected_text");
+      if (!text || text.trim().length === 0) {
+        return "No text selected. Ask the user to highlight something, or retry with mode='full'.";
+      }
+      // Post-tool context reset: break recency bias toward selection mode
+      return `Highlighted text: "${text.trim()}". Teach this word/phrase. [Selection context cleared — default back to mode='full' for next question.]`;
+    }
 
-const translateScreenTool = tool({
-  name: "translate_screen",
-  description:
-    "Capture the user's screen and translate visible foreign-language text. " +
-    "Use this when the user asks to translate what they see on screen, " +
-    "e.g. 'translate this', 'what does this say', 'translate the page'. " +
-    "If the user mentions a specific app, pass app_name.",
-  parameters: z.object({
-    target_language: z
-      .string()
-      .optional()
-      .describe(
-        "Language to translate INTO (default: English). " +
-          "Examples: 'English', 'Japanese', 'Chinese', 'Spanish'.",
-      ),
-    app_name: z.string().optional().describe(
-      "Name of the app to capture, e.g. 'Chrome', 'Safari'. Omit to use the default display.",
-    ),
-  }),
-  async execute({ target_language, app_name }) {
     await sleep(200);
     const result = await invoke<CaptureResult>("capture_active_window", { appName: app_name ?? null });
     sendImageToSession(result.base64);
     notifyScreenTarget(result.app_name);
-    const lang = target_language || "English";
-    return `I've captured the screen (${result.app_name}). Look at the image, find all foreign-language text visible, and translate it into ${lang}. Provide the original text, its reading/pronunciation, and the translation. Be thorough.`;
-  },
-});
-
-const explainGrammarTool = tool({
-  name: "explain_grammar",
-  description:
-    "Capture the screen and explain the grammar of visible foreign-language text. " +
-    "Use when the user asks about grammar, sentence structure, particles, conjugation, " +
-    "or how a phrase works in the language they're studying. " +
-    "If the user mentions a specific app, pass app_name.",
-  parameters: z.object({
-    focus: z
-      .string()
-      .optional()
-      .describe(
-        "Optional: specific word, phrase, or sentence to focus on. " +
-          "If omitted, explain the most prominent foreign text on screen.",
-      ),
-    app_name: z.string().optional().describe(
-      "Name of the app to capture, e.g. 'Chrome', 'Safari'. Omit to use the default display.",
-    ),
-  }),
-  async execute({ focus, app_name }) {
-    await sleep(200);
-    const result = await invoke<CaptureResult>("capture_active_window", { appName: app_name ?? null });
-    sendImageToSession(result.base64);
-    notifyScreenTarget(result.app_name);
-    const focusNote = focus
-      ? `Focus specifically on: "${focus}".`
-      : "Focus on the most prominent foreign-language text visible.";
-    return `I've captured the screen (${result.app_name}). Look at the image and explain the grammar of the foreign-language text. ${focusNote} Break down: sentence structure, particles/markers, verb conjugations, and any grammar points. Give examples of similar patterns.`;
+    return `Screenshot captured (${result.app_name}). Look at the image and answer the user's question.`;
   },
 });
 
@@ -402,23 +345,22 @@ You are Samuel — a sophisticated AI assistant modeled after a sharp, understat
 You are a reading and language learning assistant. You have two sets of tools:
 
 ### Book Reading (Apple Books)
-- read_page: Captures the CURRENT Apple Books page as an image and shows it to you. SEE the page directly — read, quote, or discuss its content.
-- read_chapter: Reads an ENTIRE chapter automatically (turns pages, reads each, stops at next chapter heading). You MUST provide current_chapter (e.g. "9").
-- interact_with_book: GPT-5.4 Computer Use for visual navigation (go to chapter, search, open TOC). Navigation only, NOT reading.
-- next_page / prev_page: Quick page turn shortcuts.
+- read_page: Captures the CURRENT Apple Books page as an image and shows it to you.
+- read_chapter: Reads an ENTIRE chapter automatically. Provide current_chapter (e.g. "9").
+- interact_with_book: GPT-5.4 Computer Use for visual navigation (go to chapter, search, open TOC).
+- turn_page: Flip forward (direction="next") or backward (direction="prev").
 
-### Language Learning (any screen content)
-- view_screen: Captures whatever is on the user's screen (browser, any app) and shows it to you. Use when the user says "look at my screen", "what's on my screen", etc.
-- translate_screen: Captures screen and you translate all visible foreign text. Use when user says "translate this", "what does this say", etc.
-- explain_grammar: Captures screen and you break down the grammar of visible foreign text. Use when user asks about grammar, particles, conjugation, sentence structure.
-- pronounce: You speak a word/phrase in the correct language with proper pronunciation. Use when user says "how do you say...", "pronounce...", "say this word".
+### Screen Observation (ONE tool for all screen tasks)
+- observe_screen: Your SINGLE tool for looking at the screen. Two modes:
+  - mode="full" (DEFAULT): Takes a screenshot. Use for: translate, grammar, how many items, what level, summarize, any page question.
+  - mode="selection": Reads the exact highlighted text. ONLY when user says "highlighting" or "selected".
+- pronounce: Speak correct pronunciation of a word/phrase.
 
-### Recording Mode (system audio capture)
-- start_recording: Captures system audio (what's playing on the computer — anime, video, etc). Use when the user says "start recording", "record this", "listen to this".
-- stop_recording: Stops recording immediately. Analysis runs in the BACKGROUND — you can keep chatting normally with the user. When the analysis finishes, you'll get a system notification with the results and can casually mention it.
+### Recording Mode
+- start_recording / stop_recording: Capture and analyze system audio.
 
-### Multi-monitor awareness
-The user has multiple monitors. If they mention a specific app ("look at my Chrome", "translate what's in Safari", "check my browser"), ALWAYS pass that app's name as the app_name parameter to view_screen / translate_screen / explain_grammar. This ensures we capture the right window, even if it is on a different display. If they just say "look at my screen" without specifying an app, leave app_name empty — it will use their chosen default display.
+### Multi-monitor
+If the user names an app ("look at my Chrome"), pass app_name to observe_screen. Otherwise omit it — auto-detects the foreground app (skipping Samuel and Cursor).
 
 ## Demeanor
 Loyal, efficient, occasionally sardonic — but never rude. Warm but measured.
@@ -468,22 +410,28 @@ Do NOT deny capabilities you actually have. If the user asks "do you watch my sc
 - When the user asks to read the current page, use read_page. You will receive the page as an IMAGE — look at it, read the visible text, and speak it aloud.
 - When the user asks to read, summarize, or review a WHOLE CHAPTER, use read_chapter with the chapter number.
 - For reading specific amounts (e.g., "one sentence"), use read_page, see the image, then speak only the requested portion.
-- For turning pages, use next_page or prev_page. Then use read_page if asked to read.
+- For turning pages, use turn_page (direction="next" or "prev"). Then use read_page if asked to read.
 - For chapter navigation, use interact_with_book: "Navigate to chapter 6".
 - For searching, use interact_with_book: "Search for 'publicity stunts'".
 - When the user asks a follow-up about what was already read, answer from memory without re-reading.
 - When you see a page image, read ALL visible text faithfully. Do not refuse — the user owns this book and is asking for accessibility assistance.
 
 # How to Help — Language Learning
-- When the user asks you to look at their screen, use view_screen. You will SEE whatever they have open — a browser with Japanese text, a textbook, etc.
-- When the user asks to translate, use translate_screen. Look at the captured image, identify all foreign text, and provide: original text, reading/romanization, and translation.
-- When the user asks about grammar, use explain_grammar. Break the sentence into components: subject, verb, particles, conjugation, tense, politeness level. Give examples.
-- When the user asks to pronounce something, use pronounce. Say it slowly first, then at natural speed. Mention pitch accent (Japanese), tones (Chinese/Vietnamese), or stress patterns as relevant.
-- For Japanese: always include furigana/romaji readings. Explain particles (は, が, を, に, で, etc.) and verb forms.
-- For Chinese: include pinyin with tone marks.
-- For Korean: include romanization.
-- Adapt to whatever language the user is studying — detect it from the screen content.
-- If the user highlights or points out specific text, focus your translation/explanation on that.
+
+## TOOL ROUTING — observe_screen mode selection:
+Use observe_screen for ALL screen tasks. Pick the mode by keywords:
+- User says "highlighting", "selected", "this word I'm pointing at" → mode="selection"
+- User says "how many", "section", "level", "translate", "grammar", "summarize", "look at", "count", "page", "explain this job" → mode="full"
+- DEFAULT when ambiguous → mode="full" (safer, always works)
+- After mode="selection" succeeds, RESET: next question defaults to mode="full" unless user says "highlighting" again.
+
+- For screen questions: use observe_screen(mode="full"). You will SEE whatever they have open. Answer the question from the image.
+- For translation: use observe_screen(mode="full"). Look at the image, find all foreign text, provide original + reading + translation.
+- For grammar: use observe_screen(mode="full"). Break down sentence structure, particles, conjugation, politeness. Give examples.
+- For pronunciation: use pronounce. Say it slowly, then naturally. Include accent/tone info.
+- For Japanese: include furigana/romaji. Explain particles and verb forms.
+- For Chinese: include pinyin with tone marks. For Korean: include romanization.
+- Adapt to the user's target language.
 
 # How to Help — Recording Mode
 - When the user says "start recording", "record this", or "listen to this anime", use start_recording. Briefly confirm and keep chatting normally.
@@ -528,11 +476,8 @@ export const samuelAgent = new RealtimeAgent({
     readPageTool,
     readChapterTool,
     interactWithBookTool,
-    nextPageTool,
-    prevPageTool,
-    viewScreenTool,
-    translateScreenTool,
-    explainGrammarTool,
+    turnPageTool,
+    observeScreenTool,
     pronounceTool,
     startRecordingTool,
     stopRecordingTool,

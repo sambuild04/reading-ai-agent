@@ -455,6 +455,70 @@ pub async fn capture_active_window(app_name: Option<String>) -> Result<CaptureRe
     capture_focused_window(app_name)
 }
 
+/// Read the currently selected/highlighted text from any app via the clipboard.
+/// Saves and restores the user's clipboard contents.
+#[tauri::command]
+pub async fn get_selected_text() -> Result<String, String> {
+    // 1. Save current clipboard
+    let prev = Command::new("pbpaste")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    // 2. Clear clipboard so we can detect if Cmd+C wrote something
+    let _ = Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            if let Some(ref mut stdin) = child.stdin {
+                use std::io::Write;
+                let _ = stdin.write_all(b"");
+            }
+            child.wait()
+        });
+
+    // 3. Simulate Cmd+C on the user-facing app
+    let target = get_user_facing_app().unwrap_or_default();
+    eprintln!("[selected-text] copying from: {:?}", target);
+
+    let copy_script = if target.is_empty() {
+        // No specific app found — just send Cmd+C globally
+        r#"tell application "System Events" to keystroke "c" using command down"#.to_string()
+    } else {
+        format!(
+            r#"tell application "{target}" to activate
+delay 0.1
+tell application "System Events" to keystroke "c" using command down"#
+        )
+    };
+    let _ = Command::new("/usr/bin/osascript")
+        .args(["-e", &copy_script])
+        .output();
+
+    // 4. Brief pause for clipboard to update
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // 5. Read the new clipboard
+    let selected = Command::new("pbpaste")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    // 6. Restore original clipboard
+    let mut restore = Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("pbcopy restore: {e}"))?;
+    if let Some(ref mut stdin) = restore.stdin {
+        use std::io::Write;
+        let _ = stdin.write_all(prev.as_bytes());
+    }
+    let _ = restore.wait();
+
+    eprintln!("[selected-text] got: {:?}", truncate_str(&selected, 80));
+    Ok(selected)
+}
+
 /// Enumerate connected displays for the UI picker.
 #[tauri::command]
 pub async fn list_displays() -> Result<Vec<DisplayInfo>, String> {
@@ -570,8 +634,12 @@ fn capture_focused_window(requested_app: Option<String>) -> Result<CaptureResult
 
     // Resolve which app to target
     let target_app = if let Some(ref name) = requested_app {
-        // User/model specified an app by name — find the best match from visible apps
-        let script = r#"tell application "System Events"
+        if name.is_empty() {
+            // Empty string means "auto-detect the user's real foreground app"
+            get_user_facing_app()
+        } else {
+            // User/model specified an app by name — find the best match from visible apps
+            let script = r#"tell application "System Events"
   set appList to name of every application process whose visible is true
   set output to ""
   repeat with a in appList
@@ -579,19 +647,21 @@ fn capture_focused_window(requested_app: Option<String>) -> Result<CaptureResult
   end repeat
   return output
 end tell"#;
-        let app_output = Command::new("/usr/bin/osascript")
-            .args(["-e", script])
-            .output()
-            .map_err(|e| format!("Get app list: {e}"))?;
-        let app_list_raw = String::from_utf8_lossy(&app_output.stdout);
-        let needle = name.to_lowercase();
-        app_list_raw
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .find(|l| l.to_lowercase().contains(&needle))
+            let app_output = Command::new("/usr/bin/osascript")
+                .args(["-e", script])
+                .output()
+                .map_err(|e| format!("Get app list: {e}"))?;
+            let app_list_raw = String::from_utf8_lossy(&app_output.stdout);
+            let needle = name.to_lowercase();
+            app_list_raw
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .find(|l| l.to_lowercase().contains(&needle))
+        }
     } else {
-        None
+        // No app specified at all — auto-detect user-facing app
+        get_user_facing_app()
     };
 
     let app_label = target_app.clone()
@@ -1510,6 +1580,33 @@ fn get_frontmost_app_name() -> String {
         }
         _ => String::new(),
     }
+}
+
+/// Apps to skip when auto-detecting the user's real foreground app.
+const EXCLUDED_APPS: &[&str] = &["samuel", "cursor", "electron"];
+
+/// Get the user-facing frontmost app, skipping overlay/IDE apps.
+/// Returns the first visible app (ordered by layer) that isn't Samuel or Cursor.
+fn get_user_facing_app() -> Option<String> {
+    let script = r#"tell application "System Events"
+  set appList to name of every application process whose visible is true
+  return appList
+end tell"#;
+    let output = Command::new("/usr/bin/osascript")
+        .args(["-e", script])
+        .output()
+        .ok()?;
+    if !output.status.success() { return None; }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    // macOS returns comma-separated, frontmost first
+    for name in raw.split(',') {
+        let name = name.trim();
+        if name.is_empty() { continue; }
+        let lower = name.to_lowercase();
+        if EXCLUDED_APPS.iter().any(|&ex| lower.contains(ex)) { continue; }
+        return Some(name.to_string());
+    }
+    None
 }
 
 /// Capture the active window and ask GPT-4o Vision whether the target language

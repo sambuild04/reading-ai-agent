@@ -67,6 +67,7 @@ pub fn run() {
             start_learning_audio,
             stop_learning_audio,
             check_learning_audio,
+            get_selected_text,
             memory_get_context,
             memory_set_fact,
             memory_mark_known,
