@@ -13,7 +13,6 @@ pub struct Flashcard {
     pub hint: String,
     pub transcript: String,
     pub audio_path: Option<String>,
-    pub screenshot_path: Option<String>,
     pub source: String,
     pub created_at: u64,
     pub review_count: u32,
@@ -64,29 +63,12 @@ pub fn save_audio_clip(source_path: &str) -> Option<String> {
     Some(dest)
 }
 
-/// Save a screenshot (base64 JPEG) to the flashcards directory.
-/// Returns the path to the saved image.
-pub fn save_screenshot(b64_jpeg: &str) -> Option<String> {
-    ensure_dir();
-    let ts = now_epoch();
-    let dest = format!("{FLASHCARD_DIR}/screen-{ts}.jpg");
-    let bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        b64_jpeg,
-    )
-    .ok()?;
-    fs::write(&dest, bytes).ok()?;
-    eprintln!("[flashcards] saved screenshot: {dest}");
-    Some(dest)
-}
-
 /// Add a flashcard to the deck.
 pub fn add_card(
     word: String,
     hint: String,
     transcript: String,
     audio_path: Option<String>,
-    screenshot_path: Option<String>,
     source: String,
 ) -> Flashcard {
     let mut deck = load_deck();
@@ -96,7 +78,6 @@ pub fn add_card(
         hint,
         transcript,
         audio_path,
-        screenshot_path,
         source,
         created_at: now_epoch(),
         review_count: 0,
@@ -131,17 +112,13 @@ pub async fn save_flashcard(
     hint: String,
     transcript: String,
     audio_clip_path: Option<String>,
-    screenshot_path: Option<String>,
     source: String,
 ) -> Result<Flashcard, String> {
     let audio = audio_clip_path.and_then(|p| {
         if Path::new(&p).exists() { Some(p) } else { None }
     });
-    let screenshot = screenshot_path.and_then(|p| {
-        if Path::new(&p).exists() { Some(p) } else { None }
-    });
 
-    Ok(add_card(word, hint, transcript, audio, screenshot, source))
+    Ok(add_card(word, hint, transcript, audio, source))
 }
 
 #[tauri::command]
@@ -150,9 +127,6 @@ pub async fn delete_flashcard(card_id: String) -> Result<(), String> {
     if let Some(pos) = deck.cards.iter().position(|c| c.id == card_id) {
         let card = deck.cards.remove(pos);
         if let Some(ref p) = card.audio_path {
-            let _ = fs::remove_file(p);
-        }
-        if let Some(ref p) = card.screenshot_path {
             let _ = fs::remove_file(p);
         }
         save_deck(&deck);

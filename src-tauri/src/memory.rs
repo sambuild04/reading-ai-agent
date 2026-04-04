@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 
 const MEMORY_DIR: &str = ".samuel";
@@ -8,8 +10,25 @@ const MEMORY_FILE: &str = "memory.json";
 const MAX_RECENT_OBSERVATIONS: usize = 10;
 const MAX_RECENT_TRANSCRIPTS: usize = 5;
 const VOCABULARY_COOLDOWN_SECS: u64 = 24 * 60 * 60;
-/// Vocabulary marked as permanently known never expires
 const PERMANENT_KNOWN: u64 = u64::MAX;
+const MAX_WATCH_ENTRIES: usize = 100;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Correction {
+    pub timestamp: u64,
+    pub what: String,
+    pub source: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WatchEntry {
+    pub content_hash: u64,
+    pub title_hint: String,
+    pub first_seen: u64,
+    pub last_seen: u64,
+    pub session_count: u32,
+    pub total_minutes: u32,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct SamuelMemory {
@@ -19,9 +38,12 @@ pub struct SamuelMemory {
     pub recent_observations: Vec<String>,
     #[serde(default)]
     pub facts: HashMap<String, String>,
-    /// Raw audio transcripts from ambient listening — Samuel can reference these when asked
     #[serde(default)]
     pub recent_transcripts: Vec<String>,
+    #[serde(default)]
+    pub corrections: Vec<Correction>,
+    #[serde(default)]
+    pub watch_history: Vec<WatchEntry>,
 }
 
 static MEMORY: Mutex<Option<SamuelMemory>> = Mutex::new(None);
@@ -127,6 +149,21 @@ pub fn get_context() -> String {
             ));
         }
 
+        // Recent corrections — things Samuel got wrong or user behavioral feedback
+        let corrections: Vec<&str> = mem
+            .corrections
+            .iter()
+            .rev()
+            .take(5)
+            .map(|c| c.what.as_str())
+            .collect();
+        if !corrections.is_empty() {
+            parts.push(format!(
+                "User corrections (FOLLOW THESE): {}",
+                corrections.join("; ")
+            ));
+        }
+
         if parts.is_empty() {
             "No prior context.".to_string()
         } else {
@@ -181,6 +218,103 @@ pub fn set_fact(key: &str, value: &str) {
     });
 }
 
+// ── Watch history helpers ────────────────────────────────────────────────────
+
+/// Hash a transcript window to detect repeat content
+fn hash_content(text: &str) -> u64 {
+    // Normalize: lowercase, strip punctuation, collapse whitespace
+    let normalized: String = text
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut hasher = DefaultHasher::new();
+    normalized.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Record that the user is watching content. Returns (session_count, total_minutes) for this content.
+pub fn record_watch(transcript_window: &str, title_hint: &str) -> (u32, u32) {
+    let hash = hash_content(transcript_window);
+    let now = now_secs();
+
+    with_memory(|mem| {
+        // Find existing entry with similar hash
+        if let Some(entry) = mem.watch_history.iter_mut().find(|e| e.content_hash == hash) {
+            // Same content seen before — bump if >30 min since last
+            if now.saturating_sub(entry.last_seen) > 30 * 60 {
+                entry.session_count += 1;
+            }
+            entry.total_minutes += 5; // each assessment = ~5 min window
+            entry.last_seen = now;
+            if !title_hint.is_empty() && entry.title_hint.is_empty() {
+                entry.title_hint = title_hint.to_string();
+            }
+            (entry.session_count, entry.total_minutes)
+        } else {
+            // New content
+            let entry = WatchEntry {
+                content_hash: hash,
+                title_hint: title_hint.to_string(),
+                first_seen: now,
+                last_seen: now,
+                session_count: 1,
+                total_minutes: 5,
+            };
+            let result = (entry.session_count, entry.total_minutes);
+            mem.watch_history.push(entry);
+            // Evict old entries
+            if mem.watch_history.len() > MAX_WATCH_ENTRIES {
+                mem.watch_history.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+                mem.watch_history.truncate(MAX_WATCH_ENTRIES);
+            }
+            result
+        }
+    })
+}
+
+/// Get watch stats for content matching a transcript window
+pub fn get_watch_stats(transcript_window: &str) -> Option<(u32, u32, String)> {
+    let hash = hash_content(transcript_window);
+    with_memory(|mem| {
+        mem.watch_history
+            .iter()
+            .find(|e| e.content_hash == hash)
+            .map(|e| (e.session_count, e.total_minutes, e.title_hint.clone()))
+    })
+}
+
+const MAX_CORRECTIONS: usize = 50;
+
+pub fn add_correction(what: &str, source: &str) {
+    with_memory(|mem| {
+        mem.corrections.push(Correction {
+            timestamp: now_secs(),
+            what: what.to_string(),
+            source: source.to_string(),
+        });
+        // Keep only the most recent corrections
+        if mem.corrections.len() > MAX_CORRECTIONS {
+            mem.corrections.drain(..mem.corrections.len() - MAX_CORRECTIONS);
+        }
+    });
+}
+
+/// Get recent corrections for prompt injection (last 10, newest first)
+pub fn get_recent_corrections() -> Vec<String> {
+    with_memory(|mem| {
+        mem.corrections
+            .iter()
+            .rev()
+            .take(10)
+            .map(|c| c.what.clone())
+            .collect()
+    })
+}
+
 #[tauri::command]
 pub async fn memory_get_context() -> Result<String, String> {
     Ok(get_context())
@@ -198,4 +332,85 @@ pub async fn memory_mark_known(words: Vec<String>) -> Result<(), String> {
     eprintln!("[memory] marking as permanently known: {}", words.join(", "));
     mark_known(&words);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn memory_add_correction(what: String, source: String) -> Result<(), String> {
+    eprintln!("[memory] correction from {source}: {what}");
+    add_correction(&what, &source);
+    Ok(())
+}
+
+/// Post-session feedback extraction: analyzes a conversation transcript
+/// and extracts any implicit corrections/preferences the user gave.
+#[tauri::command]
+pub async fn extract_session_feedback(transcript: String) -> Result<Vec<String>, String> {
+    let config = crate::commands::read_config_internal()?;
+    let api_key = config.api_key.ok_or("No API key")?;
+
+    let prompt = format!(
+        r#"Analyze this conversation between a user and their AI assistant "Samuel".
+Extract any feedback, corrections, or behavioral preferences the user expressed.
+
+Look for:
+- Explicit corrections: "that's wrong", "no, it means...", "don't explain it that way"
+- Behavioral feedback: "be more concise", "speak slower", "stop doing X"
+- Implicit preferences: user seems frustrated by length, user cuts off Samuel, user repeats themselves
+
+Return a JSON array of strings, each being one actionable correction.
+If no feedback found, return an empty array [].
+Return ONLY valid JSON, no markdown fences.
+
+Transcript:
+{transcript}"#
+    );
+
+    let body = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1000
+    });
+
+    let body_str = serde_json::to_string(&body)
+        .map_err(|e| format!("JSON: {e}"))?;
+
+    std::fs::write("/tmp/samuel-feedback-req.json", &body_str).ok();
+
+    let output = std::process::Command::new("/usr/bin/curl")
+        .args([
+            "-s",
+            "--max-time", "30",
+            "-X", "POST",
+            "https://api.openai.com/v1/chat/completions",
+            "-H", &format!("Authorization: Bearer {api_key}"),
+            "-H", "Content-Type: application/json",
+            "-d", "@/tmp/samuel-feedback-req.json",
+        ])
+        .output()
+        .map_err(|e| format!("curl failed: {e}"))?;
+
+    let resp_str = String::from_utf8_lossy(&output.stdout).to_string();
+    let resp: serde_json::Value = serde_json::from_str(&resp_str)
+        .map_err(|e| format!("Parse: {e}"))?;
+
+    let content = resp["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("[]");
+
+    let cleaned = content
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    let corrections: Vec<String> = serde_json::from_str(cleaned).unwrap_or_default();
+
+    // Store each correction
+    for c in &corrections {
+        add_correction(c, "voice");
+        eprintln!("[memory] extracted correction: {c}");
+    }
+
+    Ok(corrections)
 }

@@ -11,6 +11,8 @@ type RecordingActionFn = (action: "start" | "stop" | "processing" | "analyze" | 
 type LearningLanguageFn = (language: string | null) => void;
 type SendSilentContextFn = (text: string) => void;
 type SendTextAndRespondFn = (text: string) => void;
+type TeachContentFn = (input: string, language?: string) => void;
+type UIUpdateFn = (component: string, property: string, value: string) => string;
 
 let sendImageFn: SendImageFn | null = null;
 let sendTextFn: SendTextFn | null = null;
@@ -19,6 +21,8 @@ let recordingActionFn: RecordingActionFn | null = null;
 let learningLanguageFn: LearningLanguageFn | null = null;
 let sendSilentContextFn: SendSilentContextFn | null = null;
 let sendTextAndRespondFn: SendTextAndRespondFn | null = null;
+let teachContentFn: TeachContentFn | null = null;
+let uiUpdateFn: UIUpdateFn | null = null;
 
 export function registerSendImage(fn: SendImageFn | null) {
   sendImageFn = fn;
@@ -105,5 +109,53 @@ export function registerSendTextAndRespond(fn: SendTextAndRespondFn | null) {
 export function sendTextAndRespond(text: string): boolean {
   if (!sendTextAndRespondFn) return false;
   sendTextAndRespondFn(text);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Teach Mode bridge
+// ---------------------------------------------------------------------------
+
+export function registerTeachContent(fn: TeachContentFn | null) {
+  teachContentFn = fn;
+}
+
+/** Called by Samuel's teach_from_content tool to trigger teach mode from voice. */
+export function notifyTeachContent(input: string, language?: string) {
+  teachContentFn?.(input, language);
+}
+
+// ---------------------------------------------------------------------------
+// UI Update bridge
+// ---------------------------------------------------------------------------
+
+export function registerUIUpdate(fn: UIUpdateFn | null) {
+  uiUpdateFn = fn;
+}
+
+/** Called by Samuel's update_ui tool to change UI properties via voice. */
+export function applyUIUpdate(component: string, property: string, value: string): string {
+  if (!uiUpdateFn) {
+    console.warn("[session-bridge] applyUIUpdate called but no uiUpdateFn registered");
+    return "UI update not available.";
+  }
+  return uiUpdateFn(component, property, value);
+}
+
+// ---------------------------------------------------------------------------
+// Dismiss Card bridge
+// ---------------------------------------------------------------------------
+
+type DismissCardFn = () => void;
+let dismissCardFn: DismissCardFn | null = null;
+
+export function registerDismissCard(fn: DismissCardFn | null) {
+  dismissCardFn = fn;
+}
+
+/** Dismiss the currently visible vocab card. Called by Samuel's dismiss_card tool. */
+export function dismissCurrentCard(): boolean {
+  if (!dismissCardFn) return false;
+  dismissCardFn();
   return true;
 }

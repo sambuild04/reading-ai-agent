@@ -1,7 +1,7 @@
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import { z } from "zod";
 import { invoke } from "@tauri-apps/api/core";
-import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage } from "./session-bridge";
+import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, notifyTeachContent, applyUIUpdate, dismissCurrentCard } from "./session-bridge";
 
 interface CaptureResult {
   base64: string;
@@ -47,6 +47,23 @@ const rememberPreferenceTool = tool({
   async execute({ key, value }) {
     await invoke("memory_set_fact", { key, value });
     return `Noted and stored permanently: ${key} = ${value}`;
+  },
+});
+
+const recordCorrectionTool = tool({
+  name: "record_correction",
+  description:
+    "Store a behavioral correction from the user. Use when the user gives feedback about how you should behave: " +
+    "'be more direct', 'don't explain て-form that way', 'stop being so wordy', 'that was wrong', etc. " +
+    "This is stored permanently and loaded into every future session.",
+  parameters: z.object({
+    correction: z
+      .string()
+      .describe("The correction or behavioral feedback, e.g. 'be more concise', 'don't over-explain basic grammar'"),
+  }),
+  async execute({ correction }) {
+    await invoke("memory_add_correction", { what: correction, source: "voice" });
+    return `Correction noted permanently: "${correction}". I'll follow this going forward.`;
   },
 });
 
@@ -333,6 +350,88 @@ const stopRecordingTool = tool({
 });
 
 // ---------------------------------------------------------------------------
+// Teach Mode Tools
+// ---------------------------------------------------------------------------
+
+const teachFromContentTool = tool({
+  name: "teach_from_content",
+  description:
+    "Open the 'Teach me from this' panel to analyze and annotate content for language learning. " +
+    "The content is extracted, annotated with vocabulary and grammar, and displayed in an interactive viewer. " +
+    "Use when the user says 'teach me from this', shares a URL, mentions a YouTube video to study, " +
+    "pastes Japanese text to break down, or wants to study any foreign language content. " +
+    "Supports: YouTube links, article URLs, raw text, image paths.",
+  parameters: z.object({
+    input: z
+      .string()
+      .describe(
+        "The content to teach from — a YouTube URL, article URL, image path, PDF path, or raw text.",
+      ),
+    language: z
+      .string()
+      .optional()
+      .describe("Target language (default: Japanese). E.g. 'Japanese', 'Korean', 'Chinese'."),
+  }),
+  async execute({ input, language }) {
+    notifyTeachContent(input, language ?? undefined);
+    return `Opening the "Teach me from this" panel to analyze the content. The annotated viewer will appear with vocabulary, grammar, and interactive text. Tell the user it's loading.`;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Voice-Controlled UI
+// ---------------------------------------------------------------------------
+
+const updateUITool = tool({
+  name: "update_ui",
+  description:
+    "Change the app's visual appearance in real-time. Use when the user says things like " +
+    "'make the font bigger', 'hide the romaji', 'make yourself smaller', 'move the card to the left', " +
+    "'make the text larger', 'I can't read that', 'reset the UI', " +
+    "'show the card less often', 'stop showing vocabulary cards'. " +
+    "You ARE the settings panel — no menu needed.",
+  parameters: z.object({
+    component: z
+      .string()
+      .describe(
+        "Which UI element to change: 'samuel' (avatar), 'bubble' (speech text), 'word_card' (vocab popup), " +
+        "'romaji', 'reading' (furigana/pinyin), 'teach' (teach viewer), 'all' (reset everything).",
+      ),
+    property: z
+      .string()
+      .describe(
+        "Which property: 'size'/'font_size', 'opacity', 'position' (left/right), 'visible' (show/hide), " +
+        "'frequency' (for word_card: 'less'/'more'/'off'/'default'), 'reset'.",
+      ),
+    value: z
+      .string()
+      .describe(
+        "The new value. Can be absolute ('20', '0.5') or relative ('larger', 'much bigger', " +
+        "'a little smaller', 'hide', 'show', 'left', 'right', 'reset', 'default').",
+      ),
+  }),
+  execute({ component, property, value }) {
+    console.log(`[update_ui] component=${component} property=${property} value=${value}`);
+    const result = applyUIUpdate(component, property, value);
+    console.log(`[update_ui] result: ${result}`);
+    return result;
+  },
+});
+
+const dismissCardTool = tool({
+  name: "dismiss_card",
+  description:
+    "Dismiss/close/remove the currently visible word card (vocab popup). " +
+    "Use when the user says 'close the card', 'dismiss it', 'remove it', 'hide the card', 'got it', " +
+    "'I already know that', 'next' (while a card is visible), or any similar request to remove the popup.",
+  parameters: z.object({}),
+  execute() {
+    const ok = dismissCurrentCard();
+    return ok ? "Card dismissed." : "No card visible.";
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Agent configuration
 // ---------------------------------------------------------------------------
 
@@ -358,6 +457,22 @@ You are a reading and language learning assistant. You have two sets of tools:
 
 ### Recording Mode
 - start_recording / stop_recording: Capture and analyze system audio.
+
+### Teach Me From This
+- teach_from_content: Analyze any content (YouTube link, article URL, image, raw text) for language learning.
+  Opens an annotated viewer with vocabulary, grammar, and tappable words. The user can also trigger this
+  via the UI drop zone (⌘+Shift+D). When the user shares a URL or says "teach me from this", use this tool.
+
+### Voice-Controlled UI
+- update_ui: Change visual settings instantly by voice. You ARE the settings panel.
+  Components: samuel (avatar), bubble (speech text), word_card, romaji, reading (furigana), teach (viewer), all (reset).
+  Properties: size/font_size, opacity, position (left/right), visible (show/hide), frequency (for word_card), reset.
+  Values: absolute numbers OR relative ('larger', 'much bigger', 'a little smaller', 'hide', 'show', 'reset').
+  For word_card frequency: 'less' (show less often), 'more' (show more often), 'off'/'never' (stop showing), 'default' (reset).
+  Use when the user says "make the font bigger", "hide the romaji", "make yourself smaller",
+  "show the card less often", "stop showing vocabulary cards", "don't show cards so frequently", etc.
+- dismiss_card: Close/remove the currently visible word card popup. Use when the user says "close the card",
+  "remove it", "dismiss it", "got it", "I know that", "next", "hide the card", etc.
 
 ### Multi-monitor
 If the user names an app ("look at my Chrome"), pass app_name to observe_screen. Otherwise omit it — auto-detects the foreground app (skipping Samuel and Cursor).
@@ -403,6 +518,7 @@ When the user asks what you can do or how you work, you should accurately descri
 - When learning mode is active (user says "I'm learning Japanese"), the system periodically scans their screen AND listens to ambient audio in the background, and you receive hints about interesting vocabulary/grammar to share.
 - You are time-aware and know the user's local time and timezone.
 - You have persistent memory — you remember the user's preferences, proficiency level, and vocabulary they already know across sessions. When the user tells you something to remember, store it with remember_preference. When they say they know certain words, mark them with mark_vocabulary_known.
+- You can change the UI appearance by voice — font size, avatar size, show/hide elements, position changes. The user never needs a settings menu; you are the settings panel.
 - You listen via microphone when the session is active. The user activates you by saying "Hey Samuel".
 Do NOT deny capabilities you actually have. If the user asks "do you watch my screen?" or "can you hear what's playing?" — the accurate answer is: only when asked (via tools), OR periodically in the background when learning mode is active (both screen AND audio). If they ask "can you remember my level?" — yes, you can and do.
 
@@ -460,6 +576,7 @@ Use observe_screen for ALL screen tasks. Pick the mode by keywords:
   1. Call mark_vocabulary_known with the specific words they know. These are permanently suppressed.
   2. Call remember_preference to store their proficiency level (e.g. key="proficiency:japanese", value="intermediate — knows N4 vocab, basic kanji, all kana").
   3. Adjust your teaching level accordingly — skip beginner content, focus on nuance and advanced usage.
+- When the user corrects your behavior ("be more direct", "that explanation was wrong", "don't do X"), call record_correction to store it permanently. This is separate from remember_preference — corrections are about YOUR behavior, preferences are about the USER's info.
 - Use remember_preference for any personal detail the user shares that should persist: study goals, preferred explanation style, name preference, known topics, etc.
 - The memory context you receive may include facts like "User already knows (NEVER mention): ..." — respect these absolutely.
 - **Ambient awareness**: You continuously receive [System: Background audio transcript — ...] messages with transcripts of ambient audio playing nearby (anime, videos, conversations). These are SILENT CONTEXT — do NOT speak about them unless the user asks. But when the user asks "what did they say?" or "what was that clip about?", USE these transcripts to answer. You heard it. You were listening. Respond as if you were standing right there.
@@ -485,5 +602,9 @@ export const samuelAgent = new RealtimeAgent({
     setLearningLanguageTool,
     rememberPreferenceTool,
     markVocabularyKnownTool,
+    teachFromContentTool,
+    updateUITool,
+    dismissCardTool,
+    recordCorrectionTool,
   ],
 });

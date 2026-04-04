@@ -7,7 +7,6 @@ interface Flashcard {
   hint: string;
   transcript: string;
   audio_path: string | null;
-  screenshot_path: string | null;
   source: string;
   created_at: number;
   review_count: number;
@@ -23,7 +22,6 @@ export function FlashcardDeck({ visible, onClose }: Props) {
   const [currentIdx, setCurrentIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [screenshotSrc, setScreenshotSrc] = useState<string | null>(null);
 
   const loadDeck = useCallback(async () => {
     try {
@@ -42,18 +40,6 @@ export function FlashcardDeck({ visible, onClose }: Props) {
 
   const current = cards[currentIdx];
 
-  // Load screenshot as base64 data URL when the current card changes
-  useEffect(() => {
-    setScreenshotSrc(null);
-    if (!current?.screenshot_path) return;
-    let cancelled = false;
-    invoke<string>("read_flashcard_file", { filePath: current.screenshot_path })
-      .then((b64) => {
-        if (!cancelled) setScreenshotSrc(`data:image/jpeg;base64,${b64}`);
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [current?.id, current?.screenshot_path]);
 
   const handlePlayClip = useCallback(async () => {
     if (!current?.audio_path) return;
@@ -144,13 +130,6 @@ export function FlashcardDeck({ visible, onClose }: Props) {
                   >
                     {isPlaying ? "Playing..." : "Replay Scene Clip"}
                   </button>
-                )}
-                {screenshotSrc && (
-                  <img
-                    className="flashcard-screenshot"
-                    src={screenshotSrc}
-                    alt="scene"
-                  />
                 )}
               </div>
             )}

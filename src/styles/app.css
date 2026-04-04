@@ -31,15 +31,17 @@ html, body, #root {
   gap: 0.75rem;
 }
 
-/* Rive canvas container */
+/* Rive canvas container — size driven by CSS variable from voice UI control */
 .character-avatar {
-  width: 320px;
-  height: 320px;
+  width: var(--samuel-size, 320px);
+  height: var(--samuel-size, 320px);
+  opacity: var(--samuel-opacity, 1);
   border-radius: 50%;
   overflow: hidden;
   position: relative;
   z-index: 1;
   flex-shrink: 0;
+  transition: width 0.3s ease, height 0.3s ease, opacity 0.3s ease;
 }
 
 .character-avatar > div {
@@ -55,11 +57,12 @@ html, body, #root {
   overflow-y: auto;
   padding: 14px 18px;
   border-radius: 18px;
-  font-size: 15px;
+  font-size: var(--bubble-font-size, 15px);
   line-height: 1.5;
   animation: bubble-in 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
   z-index: 2;
   flex-shrink: 1;
+  transition: font-size 0.2s ease;
 }
 
 .speech-bubble p {
@@ -654,7 +657,8 @@ html, body, #root {
 /* ── Vocab/Grammar Card — ambient learning pop-up ────────── */
 .vocab-card {
   position: fixed;
-  right: 20px;
+  right: var(--vocab-card-side, 20px);
+  left: var(--vocab-card-side-left, auto);
   top: 50%;
   transform: translateY(-50%);
   z-index: 100;
@@ -680,32 +684,6 @@ html, body, #root {
   animation: vocab-card-leave 0.4s cubic-bezier(0.55, 0, 1, 0.45) both;
 }
 
-/* Timer ring — top-right corner */
-.vocab-card-timer-ring {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  width: 32px;
-  height: 32px;
-}
-
-.vocab-card-timer-track {
-  stroke: rgba(255, 255, 255, 0.06);
-}
-
-.vocab-card-timer-fill {
-  stroke: rgba(99, 102, 241, 0.6);
-  transition: stroke-dasharray 0.3s ease;
-}
-
-.vocab-card-timer-text {
-  fill: rgba(255, 255, 255, 0.4);
-  font-size: 9px;
-  text-anchor: middle;
-  dominant-baseline: central;
-  font-family: ui-monospace, monospace;
-}
-
 /* Source badge */
 .vocab-card-header {
   margin-bottom: 12px;
@@ -720,6 +698,37 @@ html, body, #root {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-weight: 600;
+  flex: 1;
+}
+
+.vocab-card-header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* Close button */
+.vocab-card-close-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.vocab-card-close-btn:hover {
+  background: rgba(255, 80, 80, 0.2);
+  border-color: rgba(255, 80, 80, 0.3);
+  color: rgba(255, 120, 120, 0.9);
 }
 
 /* Scene clip replay button */
@@ -990,13 +999,6 @@ html, body, #root {
   border-color: rgba(99, 102, 241, 0.4);
 }
 
-.flashcard-screenshot {
-  width: 100%;
-  border-radius: 8px;
-  margin-top: 8px;
-  opacity: 0.8;
-}
-
 .flashcard-nav {
   display: flex;
   gap: 8px;
@@ -1028,4 +1030,624 @@ html, body, #root {
 .flashcard-delete-btn:hover:not(:disabled) {
   background: rgba(239, 68, 68, 0.1) !important;
   color: #ef4444 !important;
+}
+
+/* ── Teach Mode — Drop Zone ──────────────────────────────── */
+/* ── Mailbox — compact input near avatar ──────────────────── */
+.mailbox-icon {
+  position: absolute;
+  right: -8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(15, 20, 35, 0.85);
+  backdrop-filter: blur(8px);
+  color: rgba(255, 255, 255, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  z-index: 5;
+}
+.mailbox-icon:hover {
+  color: rgba(255, 255, 255, 0.85);
+  border-color: rgba(99, 102, 241, 0.5);
+  background: rgba(99, 102, 241, 0.12);
+}
+.mailbox-open {
+  color: #818cf8;
+  border-color: rgba(99, 102, 241, 0.6);
+  background: rgba(99, 102, 241, 0.15);
+}
+.mailbox-busy {
+  pointer-events: none;
+  color: #818cf8;
+  border-color: rgba(99, 102, 241, 0.4);
+}
+.mailbox-spin {
+  animation: spin 0.8s linear infinite;
+}
+
+.mailbox-progress-label {
+  position: absolute;
+  right: -130px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 12px;
+  color: #818cf8;
+  white-space: nowrap;
+  animation: gentle-pulse 2s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.mailbox-popover {
+  position: fixed;
+  bottom: 50%;
+  left: 50%;
+  transform: translateX(40px);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: rgba(10, 15, 30, 0.95);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: 14px;
+  backdrop-filter: blur(12px);
+  z-index: 200;
+  animation: fade-in 0.15s ease both;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.mailbox-input {
+  width: 240px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: #e2e8f0;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.mailbox-input:focus {
+  border-color: rgba(99, 102, 241, 0.4);
+}
+.mailbox-input::placeholder {
+  color: rgba(255, 255, 255, 0.25);
+}
+
+.mailbox-send {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: none;
+  background: rgba(99, 102, 241, 0.7);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+.mailbox-send:hover:not(:disabled) {
+  background: rgba(99, 102, 241, 1);
+}
+.mailbox-send:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* ── Teach Mode — Annotated Viewer ───────────────────────── */
+.teach-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 250;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fade-in 0.2s ease both;
+}
+
+.teach-panel {
+  width: 520px;
+  max-height: 85vh;
+  background: rgba(10, 15, 30, 0.96);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  border-radius: 24px;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: bubble-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.teach-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 12px;
+  gap: 12px;
+}
+
+.teach-header-left {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.teach-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.teach-type-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(167, 139, 250, 0.9);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.teach-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #e2e8f0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.teach-ask-btn {
+  padding: 6px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  background: rgba(99, 102, 241, 0.12);
+  color: #a78bfa;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.teach-ask-btn:hover {
+  background: rgba(99, 102, 241, 0.25);
+  border-color: rgba(99, 102, 241, 0.5);
+}
+
+.teach-close {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.06);
+  color: #94a3b8;
+  font-size: 18px;
+  cursor: pointer;
+  border: none;
+  transition: all 0.15s;
+}
+.teach-close:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #e2e8f0;
+}
+
+.teach-player {
+  margin: 0 0 12px;
+  border-radius: 8px;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  max-height: 220px;
+}
+.teach-player iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.teach-summary {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.5);
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 10px;
+  border-left: 2px solid rgba(99, 102, 241, 0.3);
+}
+
+/* Tabs */
+.teach-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 12px;
+  padding: 3px;
+}
+
+.teach-tab {
+  flex: 1;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.teach-tab:hover {
+  color: rgba(255, 255, 255, 0.7);
+}
+.teach-tab-active {
+  background: rgba(99, 102, 241, 0.15);
+  color: #a78bfa;
+}
+
+/* Scrollable content */
+.teach-content {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* Text lines */
+.teach-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.teach-line {
+  padding: 8px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s;
+  border-left: 2px solid transparent;
+}
+.teach-line:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.teach-line-annotated {
+  border-left-color: rgba(99, 102, 241, 0.3);
+}
+.teach-line-selected {
+  background: rgba(99, 102, 241, 0.08);
+  border-left-color: rgba(99, 102, 241, 0.6);
+}
+
+.teach-line-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.teach-timestamp {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.3);
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, monospace;
+  min-width: 32px;
+  flex-shrink: 0;
+}
+
+.teach-line-text {
+  font-size: var(--teach-font-size, 14px);
+  line-height: 1.6;
+  color: #e2e8f0;
+  transition: font-size 0.2s ease;
+}
+
+.teach-line-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(99, 102, 241, 0.5);
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* Highlighted (tappable) vocabulary words in text */
+.teach-highlight-word {
+  color: #f0abfc;
+  text-decoration: underline;
+  text-decoration-color: rgba(240, 171, 252, 0.3);
+  text-underline-offset: 3px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.teach-highlight-word:hover {
+  text-decoration-color: rgba(240, 171, 252, 0.7);
+  background: rgba(240, 171, 252, 0.08);
+  border-radius: 4px;
+}
+
+/* Inline detail panel when line is selected */
+.teach-line-detail {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  animation: badge-in 0.2s ease-out;
+}
+
+.teach-inline-vocab {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+.teach-iv-word {
+  color: #f0abfc;
+  font-weight: 600;
+}
+.teach-iv-reading {
+  color: #a5f3fc;
+  font-size: 12px;
+}
+.teach-iv-meaning {
+  color: #cbd5e1;
+}
+.teach-iv-level {
+  color: #fbbf24;
+  font-size: 11px;
+  font-weight: 600;
+  margin-left: auto;
+}
+
+.teach-inline-grammar {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+.teach-ig-pattern {
+  color: #a78bfa;
+  font-weight: 600;
+}
+.teach-ig-explanation {
+  color: #cbd5e1;
+}
+
+.teach-explain-btn {
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  background: rgba(99, 102, 241, 0.1);
+  color: #a78bfa;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.teach-explain-btn:hover {
+  background: rgba(99, 102, 241, 0.2);
+}
+
+/* Vocab list tab */
+.teach-vocab-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.teach-vocab-item {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.teach-vocab-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(99, 102, 241, 0.2);
+}
+
+.teach-vocab-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.teach-v-word {
+  font-size: 18px;
+  font-weight: 700;
+  color: #f0abfc;
+}
+.teach-v-reading {
+  font-size: 14px;
+  color: #a5f3fc;
+}
+.teach-v-level {
+  font-size: 11px;
+  font-weight: 600;
+  color: #fbbf24;
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(251, 191, 36, 0.1);
+}
+.teach-v-meaning {
+  font-size: 14px;
+  color: #e2e8f0;
+  margin-bottom: 4px;
+}
+.teach-v-context {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Grammar list tab */
+.teach-grammar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.teach-grammar-item {
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.teach-grammar-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(99, 102, 241, 0.2);
+}
+
+.teach-g-pattern {
+  font-size: 16px;
+  font-weight: 700;
+  color: #a78bfa;
+  margin-bottom: 4px;
+}
+.teach-g-explanation {
+  font-size: 14px;
+  color: #cbd5e1;
+  line-height: 1.5;
+  margin-bottom: 4px;
+}
+.teach-g-example {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.5);
+  font-style: italic;
+}
+.teach-g-context {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.25);
+  margin-top: 6px;
+}
+
+/* Word popup (overlay when tapping a highlighted word) */
+.teach-word-popup {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fade-in 0.15s ease both;
+}
+
+.teach-wp-content {
+  width: 320px;
+  background: rgba(10, 15, 30, 0.96);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 20px;
+  padding: 24px;
+  text-align: center;
+  animation: bubble-in 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.teach-wp-word {
+  font-size: 28px;
+  font-weight: 700;
+  color: #f0abfc;
+  margin-bottom: 4px;
+}
+.teach-wp-reading {
+  font-size: 16px;
+  color: #a5f3fc;
+  margin-bottom: 8px;
+}
+.teach-wp-meaning {
+  font-size: 15px;
+  color: #e2e8f0;
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+.teach-wp-level {
+  font-size: 12px;
+  font-weight: 600;
+  color: #fbbf24;
+  margin-bottom: 16px;
+}
+
+.teach-wp-actions {
+  display: flex;
+  gap: 8px;
+}
+.teach-wp-actions button {
+  flex: 1;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.teach-wp-actions button:first-child {
+  border-color: rgba(99, 102, 241, 0.3);
+  background: rgba(99, 102, 241, 0.12);
+  color: #a78bfa;
+}
+.teach-wp-actions button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Processing spinner for teach mode */
+.teach-processing {
+  position: fixed;
+  bottom: 50%;
+  left: 50%;
+  transform: translateX(40px);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: rgba(10, 15, 30, 0.92);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  border-radius: 14px;
+  backdrop-filter: blur(12px);
+  z-index: 200;
+  animation: fade-in 0.15s ease both;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.teach-processing-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(99, 102, 241, 0.15);
+  border-top-color: #818cf8;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.teach-processing-label {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.6);
+  white-space: nowrap;
 }

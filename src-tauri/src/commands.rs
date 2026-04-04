@@ -39,8 +39,6 @@ struct ScreenState {
 }
 static SCREEN_STATE: Mutex<Option<ScreenState>> = Mutex::new(None);
 
-// Last captured screenshot path — used for flashcard snapshots
-static LATEST_SCREENSHOT: Mutex<Option<String>> = Mutex::new(None);
 
 // Apps where Samuel stays silent (deep focus)
 const FOCUS_APPS: &[&str] = &[
@@ -1628,11 +1626,6 @@ pub async fn check_screen_for_language(language: String) -> Result<Option<String
         return Ok(None);
     }
 
-    // Save screenshot for potential flashcard use
-    if let Some(path) = crate::flashcards::save_screenshot(b64) {
-        *LATEST_SCREENSHOT.lock().unwrap() = Some(path);
-    }
-
     // Screen change detection: hash the screenshot, compare with last state
     let current_hash = hash_bytes(b64.as_bytes());
     let current_app = get_frontmost_app_name();
@@ -1955,10 +1948,6 @@ pub struct AudioCheckResult {
     pub clip_path: Option<String>,
 }
 
-#[tauri::command]
-pub fn get_latest_screenshot_path() -> Option<String> {
-    LATEST_SCREENSHOT.lock().unwrap().clone()
-}
 
 /// Detect whether the user is in deep focus, casually available, or idle.
 #[tauri::command]
@@ -2108,6 +2097,162 @@ Rules:
         classification,
         confidence,
         message,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Viewing session assessment — meta-commentary on content difficulty/repetition
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ViewingAssessment {
+    pub classification: String,
+    pub message: String,
+    pub confidence: f64,
+}
+
+/// Accumulates transcript snippets over a 5-minute window for the assessment
+static TRANSCRIPT_WINDOW: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+#[tauri::command]
+pub async fn append_transcript_window(text: String) -> Result<(), String> {
+    let mut window = TRANSCRIPT_WINDOW.lock().map_err(|e| format!("lock: {e}"))?;
+    window.push(text);
+    if window.len() > 20 {
+        let excess = window.len() - 20;
+        window.drain(..excess);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn assess_viewing_session(language: String) -> Result<ViewingAssessment, String> {
+    let config = read_config_internal()?;
+    let api_key = config.api_key.ok_or("No API key")?;
+
+    // Collect the transcript window
+    let window = {
+        let guard = TRANSCRIPT_WINDOW.lock().map_err(|e| format!("lock: {e}"))?;
+        guard.clone()
+    };
+
+    if window.is_empty() {
+        return Ok(ViewingAssessment {
+            classification: "silent".to_string(),
+            message: String::new(),
+            confidence: 0.0,
+        });
+    }
+
+    let transcript_text = window.join("\n");
+
+    // Record watch and get history stats
+    let (session_count, total_minutes) = memory::record_watch(&transcript_text, "");
+
+    let memory_context = memory::get_context();
+
+    let prompt = format!(
+        r#"You are Samuel's viewing advisor. The user is learning {language} by watching anime/video.
+
+User context: {memory_context}
+Watch history for this content: {session_count} session(s), ~{total_minutes} minutes total across all sessions
+
+Recent transcript from the past ~5 minutes of audio:
+---
+{transcript_text}
+---
+
+Assess the viewing situation. Return JSON ONLY:
+{{
+  "classification": "silent|too_hard|too_easy|repetition|good_match|suggestion",
+  "message": "what Samuel should say, in character as a butler. null if silent.",
+  "confidence": 0.0-1.0
+}}
+
+Classification guide:
+- "silent" (DEFAULT — use this 70%+ of the time): Nothing worth commenting on. Content is fine.
+- "too_hard": The dialogue uses vocabulary/grammar well above the user's stated level. For example: news broadcasts, formal speeches, business Japanese, political debates, or dense N1/N2 anime for an N4 learner. Flag this when the content is clearly above their comfort zone.
+- "too_easy": Content is clearly below their level (e.g., children's show for an N2 learner). Only flag if dramatically mismatched.
+- "repetition": User has watched this exact content {session_count} or more times. Only flag if session_count >= 3.
+- "good_match": Content difficulty matches their level well. Only say this ONCE per session, and only if you're genuinely confident.
+- "suggestion": The user might benefit from switching content. Only when there's a clear reason.
+
+CRITICAL RULES:
+- Default to "silent". Silence is usually the right answer.
+- Never be condescending. Samuel is a butler, not a teacher lecturing a student.
+- If the user hasn't stored a proficiency level yet, ALWAYS return "silent" (you can't judge difficulty without a baseline).
+- If the user's level IS stored (e.g. "JLPT N4"), actively compare it against the transcript. News, political talk shows, business Japanese, and fast native speech are typically N2-N1 level — an N4 learner would struggle with these.
+- Repetition is only notable at 3+ sessions — rewatching once or twice is normal study behavior.
+- If message is not null, write it as Samuel would speak: "Sir, ...", brief, one sentence max.
+- Example messages: "Sir, this program seems rather advanced for your current level — perhaps something lighter?", "Sir, this news broadcast is quite dense — shall I find something more approachable?""#
+    );
+
+    let payload = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "messages": [{ "role": "user", "content": prompt }],
+        "max_tokens": 200,
+        "temperature": 0.2
+    });
+
+    let output = Command::new("curl")
+        .args([
+            "-s",
+            "--max-time", "15",
+            "-X", "POST",
+            "https://api.openai.com/v1/chat/completions",
+            "-H", &format!("Authorization: Bearer {api_key}"),
+            "-H", "Content-Type: application/json",
+            "-d", &payload.to_string(),
+        ])
+        .output()
+        .map_err(|e| format!("assess curl: {e}"))?;
+
+    if !output.status.success() {
+        return Ok(ViewingAssessment {
+            classification: "silent".to_string(),
+            message: String::new(),
+            confidence: 0.0,
+        });
+    }
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap_or_default();
+
+    let content = body["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("{}");
+
+    let cleaned = content
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(cleaned).unwrap_or_default();
+
+    let classification = parsed["classification"]
+        .as_str()
+        .unwrap_or("silent")
+        .to_string();
+    let confidence = parsed["confidence"].as_f64().unwrap_or(0.0);
+    let message = parsed["message"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    eprintln!(
+        "[viewing-assess] {} (conf={:.2}): {}",
+        classification,
+        confidence,
+        truncate_str(&message, 80)
+    );
+
+    Ok(ViewingAssessment {
+        classification,
+        message,
+        confidence,
     })
 }
 

@@ -6,7 +6,9 @@ import type { Suggestion } from "../components/PassiveSuggestion";
 
 const STORAGE_KEY = "samuel-learning-language";
 const CHECK_INTERVAL_MS = 20_000; // check every 20s — fast enough to feel present
-const MIN_PROACTIVE_GAP_MS = 45_000; // at least 45s between proactive speech
+const DEFAULT_PROACTIVE_GAP_MS = 45_000;
+const ASSESS_INTERVAL_MS = 3 * 60 * 1000; // viewing assessment every 3 min
+const MIN_ASSESS_WARMUP_MS = 2 * 60 * 1000; // allow assessments after 2 min warmup
 
 interface TriageDecision {
   classification: string;
@@ -20,6 +22,12 @@ interface AudioCheckResult {
   clip_path: string | null;
 }
 
+interface ViewingAssessment {
+  classification: string;
+  message: string;
+  confidence: number;
+}
+
 export interface UseLearningModeReturn {
   learningLanguage: string | null;
   learningActive: boolean;
@@ -29,7 +37,13 @@ export interface UseLearningModeReturn {
   elaborateSuggestion: () => void;
 }
 
-export function useLearningMode(sessionStatus: ConnectionStatus): UseLearningModeReturn {
+export function useLearningMode(
+  sessionStatus: ConnectionStatus,
+  vocabCardIntervalSec?: number,
+): UseLearningModeReturn {
+  const proactiveGapMs = vocabCardIntervalSec
+    ? vocabCardIntervalSec * 1000
+    : DEFAULT_PROACTIVE_GAP_MS;
   const [language, setLanguage] = useState<string | null>(
     () => localStorage.getItem(STORAGE_KEY) || null,
   );
@@ -85,6 +99,11 @@ export function useLearningMode(sessionStatus: ConnectionStatus): UseLearningMod
     };
   }, [language]);
 
+  // Tracks when the session started (for warmup gating)
+  const sessionStartRef = useRef(0);
+  // Tracks whether we already gave a "good_match" comment this session
+  const goodMatchGivenRef = useRef(false);
+
   // Main observation loop — checks BOTH audio and screen every cycle
   useEffect(() => {
     if (!language || sessionStatus !== "connected") {
@@ -93,6 +112,8 @@ export function useLearningMode(sessionStatus: ConnectionStatus): UseLearningMod
     }
 
     setActive(true);
+    sessionStartRef.current = Date.now();
+    goodMatchGivenRef.current = false;
 
     const runCheck = async () => {
       if (checkInFlightRef.current) return;
@@ -109,17 +130,24 @@ export function useLearningMode(sessionStatus: ConnectionStatus): UseLearningMod
           ),
         ]);
 
-        // Always inject raw context so Samuel "knows" what's happening
+        // Feed transcript to the viewing assessment window
         if (audioResult.transcript) {
-          sendSilentContext(
-            `[System: Background audio — you just overheard: "${audioResult.transcript}". ` +
-            `This is ambient context. Do NOT speak about it unless the user asks.]`,
-          );
+          invoke("append_transcript_window", { text: audioResult.transcript }).catch(() => {});
+        }
+
+        // Inject ONE combined silent context (replaces the previous one to keep
+        // conversation lean — avoids flooding the Realtime session with dozens of
+        // background messages that make the model unresponsive).
+        const contextParts: string[] = [];
+        if (audioResult.transcript) {
+          contextParts.push(`Audio: "${audioResult.transcript}"`);
         }
         if (screenHint && !screenHint.startsWith("NONE")) {
+          contextParts.push(`Screen: "${screenHint}"`);
+        }
+        if (contextParts.length > 0) {
           sendSilentContext(
-            `[System: Screen observation — you just noticed: "${screenHint}". ` +
-            `This is ambient context. Do NOT speak about it unless the user asks.]`,
+            `[System: Ambient context — ${contextParts.join(" | ")}. Do NOT speak about this unless the user asks.]`,
           );
         }
 
@@ -134,7 +162,7 @@ export function useLearningMode(sessionStatus: ConnectionStatus): UseLearningMod
         if (attention === "focused") return;
 
         const now = Date.now();
-        if (now - lastProactiveRef.current < MIN_PROACTIVE_GAP_MS) return;
+        if (now - lastProactiveRef.current < proactiveGapMs) return;
 
         const decision = await invoke<TriageDecision>("triage_observation", {
           observation: bestHint,
@@ -165,17 +193,50 @@ export function useLearningMode(sessionStatus: ConnectionStatus): UseLearningMod
       }
     };
 
+    // ── Viewing session assessment — proactive commentary on difficulty/repetition ──
+    const runAssessment = async () => {
+      // No assessments during warmup period
+      if (Date.now() - sessionStartRef.current < MIN_ASSESS_WARMUP_MS) return;
+
+      try {
+        const result = await invoke<ViewingAssessment>("assess_viewing_session", { language });
+
+        if (result.classification === "silent" || !result.message) return;
+
+        // Only give "good_match" once per session
+        if (result.classification === "good_match") {
+          if (goodMatchGivenRef.current) return;
+          goodMatchGivenRef.current = true;
+        }
+
+        // Gate on confidence
+        if (result.confidence < 0.6) return;
+
+        // Deliver through Samuel's voice
+        sendTextAndRespond(
+          `[System: Viewing assessment — Samuel should say this naturally as a brief aside: "${result.message}"]`,
+        );
+
+        console.log(`[viewing-assess] delivered: ${result.classification} — ${result.message}`);
+      } catch (e) {
+        console.error("[viewing-assess] error:", e);
+      }
+    };
+
     // Immediate first check on connect — flush any pre-connect audio
     runCheck();
 
-    // Then check every CHECK_INTERVAL_MS — setInterval is more robust than recursive setTimeout
-    const interval = setInterval(runCheck, CHECK_INTERVAL_MS);
+    // Observation loop every 20s
+    const checkInterval = setInterval(runCheck, CHECK_INTERVAL_MS);
+    // Assessment loop every 5 min
+    const assessInterval = setInterval(runAssessment, ASSESS_INTERVAL_MS);
 
     return () => {
-      clearInterval(interval);
+      clearInterval(checkInterval);
+      clearInterval(assessInterval);
       setActive(false);
     };
-  }, [language, sessionStatus]);
+  }, [language, sessionStatus, proactiveGapMs]);
 
   return {
     learningLanguage: language,

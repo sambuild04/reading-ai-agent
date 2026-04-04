@@ -21,36 +21,24 @@ const CARD_LIFETIME_MS = 60_000;
 export function PassiveSuggestion({ suggestion, onDismiss, onElaborate }: Props) {
   const [visible, setVisible] = useState(false);
   const [exiting, setExiting] = useState(false);
-  const [timeLeft, setTimeLeft] = useState(60);
-  const timerRef = useRef<ReturnType<typeof setInterval>>(undefined);
   const dismissTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   useEffect(() => {
     if (!suggestion) {
       setVisible(false);
       setExiting(false);
-      setTimeLeft(60);
       return;
     }
 
     setVisible(true);
     setExiting(false);
-    setTimeLeft(60);
     playBubblePop();
-
-    const start = Date.now();
-    timerRef.current = setInterval(() => {
-      const elapsed = Date.now() - start;
-      const remaining = Math.max(0, Math.ceil((CARD_LIFETIME_MS - elapsed) / 1000));
-      setTimeLeft(remaining);
-    }, 200);
 
     dismissTimerRef.current = setTimeout(() => {
       handleDismissAnimated();
     }, CARD_LIFETIME_MS);
 
     return () => {
-      clearInterval(timerRef.current);
       clearTimeout(dismissTimerRef.current);
     };
   }, [suggestion]);
@@ -71,13 +59,11 @@ export function PassiveSuggestion({ suggestion, onDismiss, onElaborate }: Props)
     if (suggestion) {
       try {
         const words = extractWords(suggestion.text);
-        const screenshotPath = await invoke<string | null>("get_latest_screenshot_path").catch(() => null);
         await invoke("save_flashcard", {
           word: words[0] || suggestion.text.slice(0, 30),
           hint: suggestion.text,
           transcript: suggestion.transcript || "",
           audioClipPath: suggestion.clipPath || null,
-          screenshotPath: screenshotPath,
           source: suggestion.source,
         });
         console.log("[vocab-card] saved flashcard");
@@ -103,7 +89,6 @@ export function PassiveSuggestion({ suggestion, onDismiss, onElaborate }: Props)
   }, [suggestion, handleDismissAnimated]);
 
   const handleExplain = useCallback(() => {
-    clearInterval(timerRef.current);
     clearTimeout(dismissTimerRef.current);
     setVisible(false);
     setExiting(false);
@@ -146,39 +131,29 @@ export function PassiveSuggestion({ suggestion, onDismiss, onElaborate }: Props)
   const icon = suggestion.source === "audio" ? "🎧" : "👁";
   const sourceLabel = suggestion.source === "audio" ? "Overheard" : "On screen";
   const hasClip = !!suggestion.clipPath;
-  const progress = timeLeft / 60;
 
   return (
     <div className={`vocab-card ${exiting ? "vocab-card-exit" : ""}`}>
-      {/* Circular countdown ring */}
-      <svg className="vocab-card-timer-ring" viewBox="0 0 36 36">
-        <circle
-          className="vocab-card-timer-track"
-          cx="18" cy="18" r="16"
-          fill="none" strokeWidth="2"
-        />
-        <circle
-          className="vocab-card-timer-fill"
-          cx="18" cy="18" r="16"
-          fill="none" strokeWidth="2.5"
-          strokeDasharray={`${progress * 100.53} 100.53`}
-          strokeLinecap="round"
-          transform="rotate(-90 18 18)"
-        />
-        <text x="18" y="19.5" className="vocab-card-timer-text">{timeLeft}</text>
-      </svg>
-
       <div className="vocab-card-header">
         <span className="vocab-card-source">{icon} {sourceLabel}</span>
-        {hasClip && (
+        <div className="vocab-card-header-right">
+          {hasClip && (
+            <button
+              onClick={handlePlayClip}
+              className="vocab-card-play-btn"
+              title="Replay the scene clip"
+            >
+              {isPlaying ? "⏸" : "▶"}
+            </button>
+          )}
           <button
-            onClick={handlePlayClip}
-            className="vocab-card-play-btn"
-            title="Replay the scene clip"
+            onClick={handleDismissAnimated}
+            className="vocab-card-close-btn"
+            title="Dismiss"
           >
-            {isPlaying ? "⏸" : "▶"}
+            ×
           </button>
-        )}
+        </div>
       </div>
 
       <p className="vocab-card-content">{suggestion.text}</p>

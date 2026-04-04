@@ -1,14 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useRealtime } from "./hooks/useRealtime";
 import { useWakeWord } from "./hooks/useWakeWord";
 import { useRecordMode } from "./hooks/useRecordMode";
 import { useLearningMode } from "./hooks/useLearningMode";
+import { useTeachMode } from "./hooks/useTeachMode";
+import { useUIPreferences } from "./hooks/useUIPreferences";
 import { playChime, playSleep } from "./lib/sounds";
 import { StatusBar } from "./components/StatusBar";
 import { Character } from "./components/Character";
 import { ScreenPicker } from "./components/ScreenPicker";
 import { PassiveSuggestion } from "./components/PassiveSuggestion";
 import { FlashcardDeck } from "./components/FlashcardDeck";
+import { TeachDrop } from "./components/TeachDrop";
+import { TeachViewer } from "./components/TeachViewer";
+import { sendTextAndRespond, registerTeachContent, registerUIUpdate, registerDismissCard } from "./lib/session-bridge";
 
 export default function App() {
   const {
@@ -25,9 +31,33 @@ export default function App() {
   } = useRealtime();
 
   const record = useRecordMode();
-  const learning = useLearningMode(status);
+  const ui = useUIPreferences();
+  const learning = useLearningMode(status, ui.prefs.vocab_card_interval);
+  const teachMode = useTeachMode();
   const [awaitingWake, setAwaitingWake] = useState(true);
   const [deckOpen, setDeckOpen] = useState(false);
+
+  // Register teach content bridge so Samuel's voice tool can trigger teach mode
+  useEffect(() => {
+    registerTeachContent((input, language) => {
+      teachMode.submit(input, language ?? learning.learningLanguage ?? undefined);
+    });
+    return () => registerTeachContent(null);
+  }, [teachMode.submit, learning.learningLanguage]);
+
+  // Register UI update bridge so Samuel can change the UI by voice
+  useEffect(() => {
+    registerUIUpdate((component, property, value) =>
+      ui.applyUpdate({ component, property, value }),
+    );
+    return () => registerUIUpdate(null);
+  }, [ui.applyUpdate]);
+
+  // Register dismiss-card bridge so Samuel can close vocab cards by voice
+  useEffect(() => {
+    registerDismissCard(() => learning.dismissSuggestion());
+    return () => registerDismissCard(null);
+  }, [learning.dismissSuggestion]);
 
   // Keep the session alive during recording and while viewing results
   // so the user can have a conversation about the clip
@@ -60,6 +90,18 @@ export default function App() {
     }
   }, [status, connect, mute, setWakeWordMode]);
 
+  // Run post-session feedback extraction when going to sleep (non-blocking)
+  const extractFeedback = useCallback(() => {
+    const entries = transcript
+      .filter((t) => t.role === "user" || t.role === "assistant")
+      .slice(-20)
+      .map((t) => `${t.role}: ${t.text}`)
+      .join("\n");
+    if (entries.length > 50) {
+      invoke("extract_session_feedback", { transcript: entries }).catch(() => {});
+    }
+  }, [transcript]);
+
   // When agentState goes idle after extended silence, re-enable wake word.
   // 15 s grace period after activation so the greeting + first exchange
   // don't prematurely flip back to wake-word mode.
@@ -76,6 +118,7 @@ export default function App() {
     playSleep();
     mute(true);
     setAwaitingWake(true);
+    extractFeedback();
   }
   prevAgentState.current = agentState;
 
@@ -85,13 +128,14 @@ export default function App() {
   });
 
   const handleDisconnect = useCallback(() => {
+    extractFeedback();
     setAwaitingWake(true);
     setWakeWordMode(false);
     disconnect();
-  }, [disconnect, setWakeWordMode]);
+  }, [disconnect, setWakeWordMode, extractFeedback]);
 
   return (
-    <div className="flex h-screen flex-col">
+    <div className="flex h-screen flex-col" style={ui.cssVars as React.CSSProperties}>
       {/* Compact header — draggable region for borderless window */}
       <div data-tauri-drag-region className="flex items-center justify-between px-5 py-2">
         <StatusBar
@@ -178,15 +222,50 @@ export default function App() {
         onClearAnalysis={record.clearAnalysis}
         learningLanguage={learning.learningLanguage}
         learningActive={learning.learningActive}
+        teachState={teachMode.state}
+        onMailboxToggle={() => {
+          if (teachMode.state === "idle" || teachMode.state === "error") {
+            teachMode.openInput();
+          } else if (teachMode.state === "input") {
+            teachMode.closeInput();
+          }
+        }}
       />
 
-      <PassiveSuggestion
-        suggestion={learning.passiveSuggestion}
-        onDismiss={learning.dismissSuggestion}
-        onElaborate={learning.elaborateSuggestion}
-      />
+      {/* Suppress vocab cards while teach mode is active or Samuel is speaking */}
+      {(teachMode.state === "idle" || teachMode.state === "error") &&
+        agentState !== "speaking" && agentState !== "thinking" && (
+        <PassiveSuggestion
+          suggestion={learning.passiveSuggestion}
+          onDismiss={learning.dismissSuggestion}
+          onElaborate={learning.elaborateSuggestion}
+        />
+      )}
 
       <FlashcardDeck visible={deckOpen} onClose={() => setDeckOpen(false)} />
+
+      <TeachDrop
+        visible={teachMode.state === "input"}
+        onToggle={teachMode.closeInput}
+        onDrop={(input) => {
+          teachMode.submit(input, learning.learningLanguage ?? undefined);
+        }}
+      />
+
+      {teachMode.state === "ready" && teachMode.content && (
+        <TeachViewer
+          content={teachMode.content}
+          selectedLine={teachMode.selectedLine}
+          onSelectLine={teachMode.selectLine}
+          onAskSamuel={(q) => {
+            sendTextAndRespond(
+              `[System: The user is studying annotated content titled "${teachMode.content!.title}". ` +
+              `They asked: ${q}. Answer concisely based on the content.]`,
+            );
+          }}
+          onClose={teachMode.close}
+        />
+      )}
     </div>
   );
 }

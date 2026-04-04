@@ -451,21 +451,40 @@ export function useRealtime(): UseRealtimeReturn {
       });
     });
 
-    // Silent context: inject background info Samuel can reference but won't speak about
+    // Silent context: inject background info Samuel can reference but won't speak about.
+    // Uses a rolling ID so we replace the previous context instead of accumulating
+    // dozens of items that bloat the conversation and slow down the model.
+    let silentContextId: string | null = null;
     registerSendSilentContext((text: string) => {
+      // Delete previous silent context to keep conversation lean
+      if (silentContextId) {
+        try {
+          session.transport.sendEvent({
+            type: "conversation.item.delete",
+            item_id: silentContextId,
+          });
+        } catch {}
+      }
+      const id = `ctx_${Date.now()}`;
+      silentContextId = id;
       session.transport.sendEvent({
         type: "conversation.item.create",
         item: {
+          id,
           type: "message",
           role: "user",
           content: [{ type: "input_text", text }],
         },
       });
-      // No response.create — Samuel absorbs the context silently
     });
 
-    // Bridge for learning mode: inject a system hint and trigger Samuel to respond
+    // Bridge for learning mode: inject a system hint and trigger Samuel to respond.
+    // Skips if the model is already generating a response to avoid session saturation.
     registerSendTextAndRespond((text: string) => {
+      if (responseInProgressRef.current) {
+        console.log("[session] skipping sendTextAndRespond — model is busy");
+        return;
+      }
       session.transport.sendEvent({
         type: "conversation.item.create",
         item: {

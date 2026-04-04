@@ -1,11 +1,13 @@
 mod commands;
 mod flashcards;
 mod memory;
+mod teach;
 mod wake_word;
 
 use commands::*;
 use flashcards::*;
 use memory::*;
+use teach::*;
 use wake_word::*;
 use tauri::Manager;
 
@@ -74,12 +76,17 @@ pub fn run() {
             memory_get_context,
             memory_set_fact,
             memory_mark_known,
-            get_latest_screenshot_path,
+            memory_add_correction,
+            extract_session_feedback,
             get_flashcard_deck,
             save_flashcard,
             delete_flashcard,
             read_flashcard_file,
             increment_flashcard_review,
+            teach_from_content,
+            annotate_lines,
+            append_transcript_window,
+            assess_viewing_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
