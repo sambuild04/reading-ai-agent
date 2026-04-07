@@ -68,7 +68,7 @@ export function TeachDrop({ visible, onToggle, onDrop }: Props) {
         ref={inputRef}
         type="text"
         className="mailbox-input"
-        placeholder="Paste a link or text…"
+        placeholder="Paste a link, key, or text…"
         value={inputText}
         onChange={(e) => setInputText(e.target.value)}
         onPaste={handlePaste}

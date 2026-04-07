@@ -1651,3 +1651,78 @@ html, body, #root {
   color: rgba(255, 255, 255, 0.6);
   white-space: nowrap;
 }
+
+/* ── Plugin Approval Card ───────────────────────────────────── */
+
+.plugin-approval {
+  position: fixed;
+  bottom: 140px;
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 240px;
+  max-width: 320px;
+  padding: 14px 18px;
+  background: rgba(10, 15, 30, 0.92);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: 16px;
+  backdrop-filter: blur(16px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  z-index: 300;
+  animation: fade-in 0.2s ease both;
+}
+.plugin-approval-exit {
+  animation: vocab-card-exit 0.3s ease both;
+}
+
+.plugin-approval-header {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgba(255, 255, 255, 0.45);
+  margin-bottom: 6px;
+}
+.plugin-approval-name {
+  color: #a78bfa;
+  font-family: monospace;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.plugin-approval-summary {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.85);
+  line-height: 1.45;
+  margin-bottom: 14px;
+}
+
+.plugin-approval-actions {
+  display: flex;
+  gap: 8px;
+}
+.plugin-approval-btn {
+  flex: 1;
+  padding: 8px 0;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.plugin-approval-btn-yes {
+  border-color: rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.12);
+  color: #86efac;
+}
+.plugin-approval-btn-yes:hover {
+  background: rgba(34, 197, 94, 0.25);
+}
+.plugin-approval-btn-no {
+  color: rgba(255, 255, 255, 0.5);
+}
+.plugin-approval-btn-no:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+}

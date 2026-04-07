@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { RealtimeSession } from "@openai/agents/realtime";
+import { RealtimeAgent, RealtimeSession } from "@openai/agents/realtime";
 import { samuelAgent } from "../lib/samuel";
-import { registerSendImage, registerSendText, registerScreenTarget, registerSendSilentContext, registerSendTextAndRespond } from "../lib/session-bridge";
+import { registerSendImage, registerSendText, registerScreenTarget, registerSendSilentContext, registerSendTextAndRespond, registerReloadPlugins } from "../lib/session-bridge";
+import { loadAllPlugins } from "../lib/plugin-loader";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 
@@ -434,6 +435,25 @@ export function useRealtime(): UseRealtimeReturn {
       session.transport.sendEvent({ type: "response.create" });
     });
 
+    // Plugin reload: loads all dynamic plugins and updates the live agent
+    const doReloadPlugins = async () => {
+      try {
+        const pluginTools = await loadAllPlugins();
+        const coreTools = samuelAgent.tools;
+        const merged = [...coreTools, ...pluginTools];
+        const updatedAgent = new RealtimeAgent({
+          name: samuelAgent.name,
+          instructions: samuelAgent.instructions as string,
+          tools: merged,
+        });
+        await session.updateAgent(updatedAgent);
+        console.log(`[plugins] agent updated: ${coreTools.length} core + ${pluginTools.length} plugin tools`);
+      } catch (err) {
+        console.error("[plugins] reload failed:", err);
+      }
+    };
+    registerReloadPlugins(doReloadPlugins);
+
     // Register the image bridge so tools can inject screenshots
     registerSendImage((base64Jpeg: string) => {
       session.transport.sendEvent({
@@ -502,6 +522,7 @@ export function useRealtime(): UseRealtimeReturn {
       registerScreenTarget(null);
       registerSendSilentContext(null);
       registerSendTextAndRespond(null);
+      registerReloadPlugins(null);
       stopKeepalive();
       session.close();
       sessionRef.current = null;
@@ -575,6 +596,24 @@ export function useRealtime(): UseRealtimeReturn {
           },
         });
         session.transport.sendEvent({ type: "response.create" });
+      }
+
+      // Load dynamic plugins and merge with core tools
+      const session_ = sessionRef.current;
+      if (session_) {
+        loadAllPlugins().then((pluginTools) => {
+          if (pluginTools.length > 0) {
+            const coreTools = samuelAgent.tools;
+            const updatedAgent = new RealtimeAgent({
+              name: samuelAgent.name,
+              instructions: samuelAgent.instructions as string,
+              tools: [...coreTools, ...pluginTools],
+            });
+            session_.updateAgent(updatedAgent).then(() => {
+              console.log(`[plugins] loaded ${pluginTools.length} plugin(s) on connect`);
+            }).catch((err) => console.error("[plugins] updateAgent failed:", err));
+          }
+        }).catch((err) => console.error("[plugins] load on connect failed:", err));
       }
 
       // Start heartbeat — keeps the Realtime API connection alive during silence

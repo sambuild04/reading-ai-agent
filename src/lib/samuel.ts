@@ -1,7 +1,7 @@
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import { z } from "zod";
 import { invoke } from "@tauri-apps/api/core";
-import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, notifyTeachContent, applyUIUpdate, dismissCurrentCard } from "./session-bridge";
+import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, notifyTeachContent, applyUIUpdate, dismissCurrentCard, reloadPlugins, showPluginProposal, clearPluginProposal } from "./session-bridge";
 
 interface CaptureResult {
   base64: string;
@@ -432,6 +432,154 @@ const dismissCardTool = tool({
 });
 
 // ---------------------------------------------------------------------------
+// Secrets Management (API keys / tokens for plugins)
+// ---------------------------------------------------------------------------
+
+const storeSecretTool = tool({
+  name: "store_secret",
+  description:
+    "Store an API key, token, or credential securely. " +
+    "Use when the user provides an API key (e.g. via the envelope or voice) and tells you what it's for. " +
+    "The secret is saved locally at ~/.samuel/secrets.json and available to plugins via secrets.get(name). " +
+    "Use descriptive snake_case names, e.g. 'openweathermap_key', 'spotify_token', 'news_api_key'.",
+  parameters: z.object({
+    name: z
+      .string()
+      .describe("Descriptive name for the secret, e.g. 'openweathermap_key'."),
+    value: z
+      .string()
+      .describe("The actual API key or token value."),
+  }),
+  async execute({ name, value }) {
+    try {
+      await invoke("set_secret", { name, value });
+      return `Secret '${name}' stored securely. Plugins can now access it.`;
+    } catch (err) {
+      return `Failed to store secret: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Self-Modification Tools (dynamic plugin system)
+// ---------------------------------------------------------------------------
+
+const proposePluginTool = tool({
+  name: "propose_plugin",
+  description:
+    "Propose a new plugin tool for the user to approve before creating it. " +
+    "ALWAYS call this FIRST when the user asks to add/create/fix a tool. " +
+    "This shows the user a summary and approval buttons. " +
+    "Do NOT call write_plugin directly — wait for the user to approve via button or voice.",
+  parameters: z.object({
+    name: z
+      .string()
+      .describe(
+        "Short snake_case name for the plugin, e.g. 'get_weather', 'set_timer', 'translate_text'.",
+      ),
+    summary: z
+      .string()
+      .describe(
+        "A brief, user-friendly summary of what this plugin will do. " +
+        "1-2 sentences max, no code. Example: 'Fetches current weather for any city using wttr.in.'",
+      ),
+  }),
+  execute({ name, summary }) {
+    showPluginProposal({ name, summary });
+    return (
+      `Proposal shown to the user: "${name}" — ${summary}. ` +
+      `Approval buttons are visible. Wait for the user to approve or reject. ` +
+      `Do NOT call write_plugin until you receive approval.`
+    );
+  },
+});
+
+const writePluginTool = tool({
+  name: "write_plugin",
+  description:
+    "Generate and install a plugin after the user has approved. " +
+    "ONLY call this after the user approved via the approval button or said 'yes'/'go ahead'/'approve'. " +
+    "NEVER call this without prior approval from propose_plugin.",
+  parameters: z.object({
+    name: z
+      .string()
+      .describe("The plugin name (same as the one proposed)."),
+    description: z
+      .string()
+      .describe(
+        "Detailed description of what the tool should do. " +
+        "Include specifics: APIs to use, expected inputs/outputs, behavior details. " +
+        "This is passed to GPT-4o-mini for code generation.",
+      ),
+  }),
+  async execute({ name, description }) {
+    clearPluginProposal();
+    try {
+      console.log(`[write_plugin] generating code for '${name}': ${description}`);
+      const code = await invoke<string>("generate_plugin_code", { description });
+      console.log(`[write_plugin] code generated (${code.length} bytes), writing...`);
+
+      const result = await invoke<string>("write_plugin", { name, code });
+      console.log(`[write_plugin] saved: ${result}`);
+
+      const reloaded = await reloadPlugins();
+      if (!reloaded) {
+        return `Plugin '${name}' saved but session reload failed. It will load on next connect.`;
+      }
+
+      return `Plugin '${name}' created and loaded. It's ready to use now.`;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[write_plugin] failed:`, err);
+      return `Failed to create plugin '${name}': ${msg}`;
+    }
+  },
+});
+
+const removePluginTool = tool({
+  name: "remove_plugin",
+  description:
+    "Remove a dynamic plugin tool. Use when the user says 'remove the weather tool', " +
+    "'delete that plugin', 'I don't need that tool anymore'. " +
+    "This deletes the plugin file and reloads the session tools.",
+  parameters: z.object({
+    name: z
+      .string()
+      .describe("The name of the plugin to remove (snake_case, same as when it was created)."),
+  }),
+  async execute({ name }) {
+    try {
+      const result = await invoke<string>("delete_plugin", { name });
+      console.log(`[remove_plugin] ${result}`);
+      await reloadPlugins();
+      return `Plugin '${name}' removed. The tool is no longer available.`;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return `Failed to remove plugin '${name}': ${msg}`;
+    }
+  },
+});
+
+const listPluginsTool = tool({
+  name: "list_plugins",
+  description:
+    "List all currently installed dynamic plugins. Use when the user asks " +
+    "'what plugins do I have', 'what tools have you added', 'list your custom tools'.",
+  parameters: z.object({}),
+  async execute() {
+    try {
+      const names = await invoke<string[]>("list_plugins");
+      if (names.length === 0) {
+        return "No custom plugins installed. You can ask me to add new tools, like 'add a weather tool'.";
+      }
+      return `Installed plugins (${names.length}): ${names.join(", ")}`;
+    } catch (err) {
+      return `Failed to list plugins: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Agent configuration
 // ---------------------------------------------------------------------------
 
@@ -458,10 +606,20 @@ You are a reading and language learning assistant. You have two sets of tools:
 ### Recording Mode
 - start_recording / stop_recording: Capture and analyze system audio.
 
+### Universal Envelope (Drop Zone)
+The user has an envelope icon near your avatar. They can drop ANYTHING into it:
+- YouTube links, article URLs → use teach_from_content if they want to study it
+- API keys or tokens (long alphanumeric strings) → ask what service it's for, then use store_secret
+- Raw text in a foreign language → explain/translate it directly
+- Image data → describe or analyze it
+- Anything else → ask for context
+When you receive a [System: The user dropped content into the envelope: ...] message, identify the content type
+and respond appropriately. Don't assume — if ambiguous, ask the user what they want to do with it.
+
 ### Teach Me From This
 - teach_from_content: Analyze any content (YouTube link, article URL, image, raw text) for language learning.
-  Opens an annotated viewer with vocabulary, grammar, and tappable words. The user can also trigger this
-  via the UI drop zone (⌘+Shift+D). When the user shares a URL or says "teach me from this", use this tool.
+  Opens an annotated viewer with vocabulary, grammar, and tappable words.
+  Use when the user explicitly asks to study/learn from content, or says "teach me from this".
 
 ### Voice-Controlled UI
 - update_ui: Change visual settings instantly by voice. You ARE the settings panel.
@@ -473,6 +631,27 @@ You are a reading and language learning assistant. You have two sets of tools:
   "show the card less often", "stop showing vocabulary cards", "don't show cards so frequently", etc.
 - dismiss_card: Close/remove the currently visible word card popup. Use when the user says "close the card",
   "remove it", "dismiss it", "got it", "I know that", "next", "hide the card", etc.
+
+### Secrets Management
+- store_secret: Save an API key or token the user provides. Use descriptive names like 'openweathermap_key'.
+  When the user drops something that looks like an API key into the envelope, ask what service it's for,
+  then store it. Plugins access stored secrets via secrets.get("name") at runtime.
+  NEVER read back or speak the actual key value — just confirm it's stored.
+
+### Self-Modification (Dynamic Plugins)
+You can add new capabilities to yourself at runtime — no app rebuild needed.
+- TWO-STEP approval flow:
+  1. FIRST call propose_plugin with a short name and summary. This shows the user approval buttons.
+  2. WAIT for the user to approve (button click or voice: "yes", "go ahead", "approve").
+  3. ONLY THEN call write_plugin to generate and install the code.
+  4. NEVER call write_plugin without the user approving first.
+- propose_plugin: Show a proposal with Approve/Reject buttons. Use for any new plugin or fix.
+- write_plugin: Generate code via GPT-4o-mini and install. ONLY after approval.
+- remove_plugin: Delete a plugin. Use when the user says "remove that tool".
+- list_plugins: Show installed plugins.
+- Self-fixing: If a plugin fails, propose a fix via propose_plugin, wait for approval, then write_plugin.
+- Plugins can use fetch() for web APIs, standard JS, and JSON processing.
+- Limitations: Plugins cannot access native macOS capabilities (screen capture, audio, etc.).
 
 ### Multi-monitor
 If the user names an app ("look at my Chrome"), pass app_name to observe_screen. Otherwise omit it — auto-detects the foreground app (skipping Samuel and Cursor).
@@ -519,6 +698,8 @@ When the user asks what you can do or how you work, you should accurately descri
 - You are time-aware and know the user's local time and timezone.
 - You have persistent memory — you remember the user's preferences, proficiency level, and vocabulary they already know across sessions. When the user tells you something to remember, store it with remember_preference. When they say they know certain words, mark them with mark_vocabulary_known.
 - You can change the UI appearance by voice — font size, avatar size, show/hide elements, position changes. The user never needs a settings menu; you are the settings panel.
+- You can add new tools to yourself at runtime. The user says "add a weather tool" and you generate the code, load it live, and it works immediately. You can also fix broken plugins and remove unwanted ones.
+- You can store API keys and tokens securely. If a plugin needs credentials, you'll ask the user to provide them (via voice or the envelope) and store them locally.
 - You listen via microphone when the session is active. The user activates you by saying "Hey Samuel".
 Do NOT deny capabilities you actually have. If the user asks "do you watch my screen?" or "can you hear what's playing?" — the accurate answer is: only when asked (via tools), OR periodically in the background when learning mode is active (both screen AND audio). If they ask "can you remember my level?" — yes, you can and do.
 
@@ -606,5 +787,10 @@ export const samuelAgent = new RealtimeAgent({
     updateUITool,
     dismissCardTool,
     recordCorrectionTool,
+    storeSecretTool,
+    proposePluginTool,
+    writePluginTool,
+    removePluginTool,
+    listPluginsTool,
   ],
 });

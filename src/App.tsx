@@ -14,6 +14,7 @@ import { PassiveSuggestion } from "./components/PassiveSuggestion";
 import { FlashcardDeck } from "./components/FlashcardDeck";
 import { TeachDrop } from "./components/TeachDrop";
 import { TeachViewer } from "./components/TeachViewer";
+import { PluginApproval } from "./components/PluginApproval";
 import { sendTextAndRespond, registerTeachContent, registerUIUpdate, registerDismissCard } from "./lib/session-bridge";
 
 export default function App() {
@@ -36,6 +37,7 @@ export default function App() {
   const teachMode = useTeachMode();
   const [awaitingWake, setAwaitingWake] = useState(true);
   const [deckOpen, setDeckOpen] = useState(false);
+  const [envelopeOpen, setEnvelopeOpen] = useState(false);
 
   // Register teach content bridge so Samuel's voice tool can trigger teach mode
   useEffect(() => {
@@ -223,13 +225,7 @@ export default function App() {
         learningLanguage={learning.learningLanguage}
         learningActive={learning.learningActive}
         teachState={teachMode.state}
-        onMailboxToggle={() => {
-          if (teachMode.state === "idle" || teachMode.state === "error") {
-            teachMode.openInput();
-          } else if (teachMode.state === "input") {
-            teachMode.closeInput();
-          }
-        }}
+        onMailboxToggle={() => setEnvelopeOpen((o) => !o)}
       />
 
       {/* Suppress vocab cards while teach mode is active or Samuel is speaking */}
@@ -245,10 +241,17 @@ export default function App() {
       <FlashcardDeck visible={deckOpen} onClose={() => setDeckOpen(false)} />
 
       <TeachDrop
-        visible={teachMode.state === "input"}
-        onToggle={teachMode.closeInput}
+        visible={envelopeOpen}
+        onToggle={() => setEnvelopeOpen(false)}
         onDrop={(input) => {
-          teachMode.submit(input, learning.learningLanguage ?? undefined);
+          setEnvelopeOpen(false);
+          sendTextAndRespond(
+            `[System: The user dropped content into the envelope: "${input}". ` +
+            `Identify what this is (YouTube link, article URL, API key/token, raw text, image, etc.) ` +
+            `and respond appropriately. If it's content to study, ask if they want you to teach from it ` +
+            `or use teach_from_content directly. If it looks like an API key or token, ask what it's for ` +
+            `so you can store it with store_secret. If it's something else, ask for context.]`,
+          );
         }}
       />
 
@@ -266,6 +269,8 @@ export default function App() {
           onClose={teachMode.close}
         />
       )}
+
+      <PluginApproval />
     </div>
   );
 }

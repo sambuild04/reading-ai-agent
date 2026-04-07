@@ -1,12 +1,16 @@
 mod commands;
 mod flashcards;
 mod memory;
+mod plugins;
+mod secrets;
 mod teach;
 mod wake_word;
 
 use commands::*;
 use flashcards::*;
 use memory::*;
+use plugins::*;
+use secrets::*;
 use teach::*;
 use wake_word::*;
 use tauri::Manager;
@@ -87,6 +91,16 @@ pub fn run() {
             annotate_lines,
             append_transcript_window,
             assess_viewing_session,
+            get_plugin_dir,
+            list_plugins,
+            read_plugin,
+            write_plugin,
+            delete_plugin,
+            generate_plugin_code,
+            get_secret,
+            set_secret,
+            delete_secret,
+            list_secrets,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

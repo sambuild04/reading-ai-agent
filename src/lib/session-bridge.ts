@@ -159,3 +159,54 @@ export function dismissCurrentCard(): boolean {
   dismissCardFn();
   return true;
 }
+
+// ---------------------------------------------------------------------------
+// Plugin reload bridge
+// ---------------------------------------------------------------------------
+
+type ReloadPluginsFn = () => Promise<void>;
+let reloadPluginsFn: ReloadPluginsFn | null = null;
+
+export function registerReloadPlugins(fn: ReloadPluginsFn | null) {
+  reloadPluginsFn = fn;
+}
+
+/** Trigger a hot-reload of all plugins into the live session. */
+export async function reloadPlugins(): Promise<boolean> {
+  if (!reloadPluginsFn) return false;
+  await reloadPluginsFn();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Plugin proposal/approval bridge
+// ---------------------------------------------------------------------------
+
+export interface PluginProposal {
+  name: string;
+  summary: string;
+}
+
+type ProposalChangeFn = (proposal: PluginProposal | null) => void;
+let proposalChangeFn: ProposalChangeFn | null = null;
+let currentProposal: PluginProposal | null = null;
+
+export function registerPluginProposalChange(fn: ProposalChangeFn | null) {
+  proposalChangeFn = fn;
+}
+
+/** Called by Samuel's propose_plugin tool to show the approval UI. */
+export function showPluginProposal(proposal: PluginProposal) {
+  currentProposal = proposal;
+  proposalChangeFn?.(proposal);
+}
+
+/** Called by Approve/Reject buttons to clear the proposal card. */
+export function clearPluginProposal() {
+  currentProposal = null;
+  proposalChangeFn?.(null);
+}
+
+export function getCurrentProposal(): PluginProposal | null {
+  return currentProposal;
+}
