@@ -187,12 +187,26 @@ export interface PluginProposal {
   summary: string;
 }
 
+export type PluginBuildPhase = "generating" | "installing" | "reloading" | "done" | "error";
+
+export interface PluginBuildProgress {
+  name: string;
+  phase: PluginBuildPhase;
+  error?: string;
+}
+
 type ProposalChangeFn = (proposal: PluginProposal | null) => void;
+type BuildProgressFn = (progress: PluginBuildProgress | null) => void;
 let proposalChangeFn: ProposalChangeFn | null = null;
+let buildProgressFn: BuildProgressFn | null = null;
 let currentProposal: PluginProposal | null = null;
 
 export function registerPluginProposalChange(fn: ProposalChangeFn | null) {
   proposalChangeFn = fn;
+}
+
+export function registerPluginBuildProgress(fn: BuildProgressFn | null) {
+  buildProgressFn = fn;
 }
 
 /** Called by Samuel's propose_plugin tool to show the approval UI. */
@@ -205,6 +219,11 @@ export function showPluginProposal(proposal: PluginProposal) {
 export function clearPluginProposal() {
   currentProposal = null;
   proposalChangeFn?.(null);
+}
+
+/** Update the plugin build progress indicator. */
+export function notifyPluginBuildProgress(progress: PluginBuildProgress | null) {
+  buildProgressFn?.(progress);
 }
 
 export function getCurrentProposal(): PluginProposal | null {

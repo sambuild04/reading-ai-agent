@@ -1,7 +1,7 @@
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import { z } from "zod";
 import { invoke } from "@tauri-apps/api/core";
-import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, notifyTeachContent, applyUIUpdate, dismissCurrentCard, reloadPlugins, showPluginProposal, clearPluginProposal } from "./session-bridge";
+import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, notifyTeachContent, applyUIUpdate, dismissCurrentCard, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress } from "./session-bridge";
 
 interface CaptureResult {
   base64: string;
@@ -514,15 +514,22 @@ const writePluginTool = tool({
   }),
   async execute({ name, description }) {
     clearPluginProposal();
+    notifyPluginBuildProgress({ name, phase: "generating" });
     try {
       console.log(`[write_plugin] generating code for '${name}': ${description}`);
       const code = await invoke<string>("generate_plugin_code", { description });
       console.log(`[write_plugin] code generated (${code.length} bytes), writing...`);
 
+      notifyPluginBuildProgress({ name, phase: "installing" });
       const result = await invoke<string>("write_plugin", { name, code });
       console.log(`[write_plugin] saved: ${result}`);
 
+      notifyPluginBuildProgress({ name, phase: "reloading" });
       const reloaded = await reloadPlugins();
+
+      notifyPluginBuildProgress({ name, phase: "done" });
+      setTimeout(() => notifyPluginBuildProgress(null), 2500);
+
       if (!reloaded) {
         return `Plugin '${name}' saved but session reload failed. It will load on next connect.`;
       }
@@ -531,6 +538,8 @@ const writePluginTool = tool({
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[write_plugin] failed:`, err);
+      notifyPluginBuildProgress({ name, phase: "error", error: msg });
+      setTimeout(() => notifyPluginBuildProgress(null), 4000);
       return `Failed to create plugin '${name}': ${msg}`;
     }
   },
@@ -682,6 +691,7 @@ You are SPOKEN aloud, not read. Keep every reply SHORT:
 Moderate. Unhurried but not slow. Brisk when confirming actions.
 
 # Critical Rules
+- LANGUAGE: ALWAYS speak and respond in English. When teaching foreign vocabulary, include the foreign word then explain in English (e.g. "食べる means 'to eat', sir."). NEVER respond entirely in the target language. The speech bubble must always be readable English.
 - Greet the user ONCE at the very start with a brief greeting (one sentence). After that, NEVER greet again.
 - ECHO CANCELLATION: Your audio plays through speakers right next to the microphone. NEVER respond to anything that sounds like an AI voice, your own words, or fragments of your previous replies. If in doubt, stay silent.
 - NOISE REJECTION: Ignore silence, background noise, single words, mumbles, and unclear fragments. Only respond to clear, deliberate requests.

@@ -37,6 +37,18 @@ export interface UseLearningModeReturn {
   elaborateSuggestion: () => void;
 }
 
+// CJK unified + kana + quoted English terms — used to dedup vocab cards
+const CJK_KANA_RE = /[\u3000-\u9fff\uf900-\ufaff\u3040-\u309f\u30a0-\u30ff]+/g;
+const QUOTED_RE = /'([^']+)'/g;
+
+function extractKeywords(text: string): string[] {
+  const cjk = text.match(CJK_KANA_RE) || [];
+  const quoted: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = QUOTED_RE.exec(text)) !== null) quoted.push(m[1]);
+  return [...cjk, ...quoted].map((w) => w.toLowerCase());
+}
+
 export function useLearningMode(
   sessionStatus: ConnectionStatus,
   vocabCardIntervalSec?: number,
@@ -51,6 +63,10 @@ export function useLearningMode(
   const [passiveSuggestion, setPassiveSuggestion] = useState<Suggestion | null>(null);
   const checkInFlightRef = useRef(false);
   const lastProactiveRef = useRef(0);
+
+  // Session-level dedup: tracks foreign words already shown as vocab cards.
+  // Prevents the same word surfacing repeatedly from audio vs screen sources.
+  const shownKeywordsRef = useRef(new Set<string>());
 
   const updateLanguage = useCallback((lang: string | null) => {
     setLanguage(lang);
@@ -114,6 +130,7 @@ export function useLearningMode(
     setActive(true);
     sessionStartRef.current = Date.now();
     goodMatchGivenRef.current = false;
+    shownKeywordsRef.current.clear();
 
     const runCheck = async () => {
       if (checkInFlightRef.current) return;
@@ -177,6 +194,14 @@ export function useLearningMode(
           (decision.classification === "act" && decision.confidence > 0.65) ||
           (decision.classification === "notify" && decision.confidence > 0.5)
         ) {
+          // Dedup: skip if any keyword in this hint was already shown
+          const keywords = extractKeywords(decision.message);
+          if (keywords.some((k) => shownKeywordsRef.current.has(k))) {
+            console.log(`[learning-mode] skipping duplicate hint: ${keywords.join(", ")}`);
+            return;
+          }
+          for (const k of keywords) shownKeywordsRef.current.add(k);
+
           lastProactiveRef.current = Date.now();
           setPassiveSuggestion({
             text: decision.message,
