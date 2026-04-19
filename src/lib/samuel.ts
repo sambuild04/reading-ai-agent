@@ -1,7 +1,7 @@
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import { z } from "zod";
 import { invoke } from "@tauri-apps/api/core";
-import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, notifyTeachContent, applyUIUpdate, dismissCurrentCard, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, playSongLines, pauseSong, showWordCard, setCardMode } from "./session-bridge";
+import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, notifyTeachContent, applyUIUpdate, dismissCurrentCard, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, playSongLines, pauseSong, showWordCard, setCardMode, toggleLyricsView, setLyricsContent } from "./session-bridge";
 import { loadPlugin } from "./plugin-loader";
 
 interface CaptureResult {
@@ -268,6 +268,44 @@ const pauseSongTool = tool({
   execute() {
     pauseSong();
     return "Paused. Mic is back on.";
+  },
+});
+
+const toggleLyricsTool = tool({
+  name: "toggle_lyrics",
+  description:
+    "Show or hide the lyrics viewer panel. When shown, all song lyrics are displayed in a scrollable " +
+    "panel that the user can read and tap lines to play. Use when the user says 'show me the lyrics', " +
+    "'open the lyrics', 'let me see the words', 'hide the lyrics', 'close the lyrics panel', etc.",
+  parameters: z.object({
+    visible: z
+      .boolean()
+      .describe("true to show the lyrics viewer, false to hide it."),
+  }),
+  execute({ visible }) {
+    const ok = toggleLyricsView(visible);
+    return ok
+      ? visible ? "Lyrics viewer is now open." : "Lyrics viewer closed."
+      : "No song lyrics are loaded right now.";
+  },
+});
+
+const showLyricsTool = tool({
+  name: "show_lyrics",
+  description:
+    "Display lyrics (or any text content) in the floating lyrics viewer panel. " +
+    "Use this after finding lyrics via web_search + web_read, or when you have lyrics text " +
+    "from any source that you want to show the user. Each line becomes a tappable row in the panel.",
+  parameters: z.object({
+    title: z.string().describe("Title shown at the top of the panel, e.g. 'Song Name — Artist'"),
+    lines: z.array(z.string()).describe("Array of lyric lines to display"),
+  }),
+  execute({ title, lines }) {
+    if (lines.length === 0) return "No lines to display.";
+    const ok = setLyricsContent(title, lines);
+    return ok
+      ? `Showing ${lines.length} lines in the lyrics viewer.`
+      : "Lyrics viewer is not available right now.";
   },
 });
 
@@ -571,6 +609,56 @@ const listPluginsTool = tool({
 });
 
 // ---------------------------------------------------------------------------
+// Web browsing — search the internet and read web pages
+// ---------------------------------------------------------------------------
+
+interface WebSearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+const webSearchTool = tool({
+  name: "web_search",
+  description:
+    "Search the internet for any information — lyrics, articles, facts, documentation, etc. " +
+    "Returns a list of results with titles, URLs, and snippets. " +
+    "Use web_read on a result URL to get the full page content.",
+  parameters: z.object({
+    query: z.string().describe("The search query, like a human would type into Google"),
+  }),
+  execute: async ({ query }) => {
+    try {
+      const results = await invoke<WebSearchResult[]>("web_search", { query });
+      if (results.length === 0) return "No results found.";
+      return results
+        .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`)
+        .join("\n\n");
+    } catch (err) {
+      return `Search failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  },
+});
+
+const webReadTool = tool({
+  name: "web_read",
+  description:
+    "Fetch and read a web page. Returns the page's text content. " +
+    "Use this to read articles, lyrics pages, documentation, or any URL.",
+  parameters: z.object({
+    url: z.string().describe("The full URL to fetch and read"),
+  }),
+  execute: async ({ url }) => {
+    try {
+      const text = await invoke<string>("web_read", { url });
+      return text || "Page returned no readable content.";
+    } catch (err) {
+      return `Failed to read page: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Agent configuration
 // ---------------------------------------------------------------------------
 
@@ -698,7 +786,8 @@ When the user asks what you can do or how you work, you should accurately descri
 - You have persistent memory — you remember the user's preferences, proficiency level, and vocabulary they already know across sessions. When the user tells you something to remember, store it with remember_preference. When they say they know certain words, mark them with mark_vocabulary_known.
 - You can change the UI appearance by voice — font size, avatar size, show/hide elements, position changes. The user never needs a settings menu; you are the settings panel.
 - You can add new tools to yourself at runtime. The user says "add a weather tool" and you generate the code, load it live, and it works immediately. You can also fix broken plugins and remove unwanted ones.
-- You can store API keys and tokens securely. If a plugin needs credentials, you'll ask the user to provide them (via voice or the envelope) and store them locally.
+- You can store API keys and tokens securely. If a plugin needs credentials, you'll ask the user to provide them (via voice or the chat box) and store them locally.
+- You can browse the internet. Use web_search to find anything — lyrics, articles, facts, translations, documentation. Use web_read to open and read any URL. When the user asks you to look something up, find lyrics, or get information from the web, search for it like a human would.
 - You listen via microphone when the session is active. The user activates you by saying "Hey Samuel".
 Do NOT deny capabilities you actually have. If the user asks "do you watch my screen?" or "can you hear what's playing?" — the accurate answer is: when you know the user is learning a language, the system periodically scans the screen and listens to ambient audio. If they ask "can you remember my level?" — yes, you can and do.
 
@@ -708,9 +797,12 @@ a suboptimal path, briefly suggest the better one — ONCE, not repeatedly. Exam
 
 - **Ambient audio is garbled** (song, fast dialogue, background noise) →
   "If you drop me the YouTube link, sir, I can pull up clean lyrics with playback control."
+  Or: "I can search the web for those lyrics — want me to look them up?"
   Or: "Shall I start recording? A dedicated recording gives me a cleaner clip to analyze."
 - **User asks about text on screen but you can't read it well** (small text, partial view) →
-  "If you highlight the text, I can read the exact selection. Or drop a screenshot into the envelope."
+  "If you highlight the text, I can read the exact selection. Or drop a screenshot into the chat."
+- **User asks you to look something up, find lyrics, get info** →
+  Use web_search to find it, then web_read to get the full content. You can browse the web like a human.
 - **User keeps asking about the same show/video repeatedly** →
   "I can record the audio while you watch — say 'start recording' and I'll do a full breakdown when you stop."
 - **User asks you to remember something but phrases it casually** →
@@ -808,11 +900,19 @@ When the user drops a YouTube song link:
    "play it again", "what's that word?", "play the chorus", etc.
 4. Use play_song_lines(from, to) to play any section. The mic auto-mutes during playback.
    SAY what you're about to play BEFORE calling the tool (you can't speak while mic is muted).
-   The tool blocks until the segment finishes — only speak AFTER it returns.
+   The tool blocks until the audio segment finishes — do NOT speak until it returns.
+   IMPORTANT: Most songs have an instrumental intro before the first lyrics. When the user asks
+   to hear the first sentence, use play_song_lines(1, 2) or play_song_lines(1, 3) to include
+   enough margin so the intro music AND the first sung line both play. Better to play a bit
+   extra than to cut off right before the vocals start. For later lines (not the beginning),
+   play_song_lines(n, n) is fine since there's no intro.
 5. Use pause_song if they want to stop mid-playback.
-6. When they ask about meaning, vocabulary, or grammar — explain from the lyrics in your context.
+6. Use toggle_lyrics(visible: true) to show all lyrics in a scrollable panel when the user asks
+   to see the lyrics ("show me the lyrics", "let me see the words", "open the lyrics").
+   Use toggle_lyrics(visible: false) to close it. The user can tap lines in the panel to play them.
+7. When they ask about meaning, vocabulary, or grammar — explain from the lyrics in your context.
    Include the Japanese line, reading, and meaning. Be conversational and flexible.
-7. If they say "teach me this song", play a few lines, explain, then ask if they want more.
+8. If they say "teach me this song", play a few lines, explain, then ask if they want more.
    Don't dump the whole song — go at their pace.
 
 
@@ -834,6 +934,8 @@ export const samuelAgent = new RealtimeAgent({
     teachFromContentTool,
     playSongLinesTool,
     pauseSongTool,
+    toggleLyricsTool,
+    showLyricsTool,
     updateUITool,
     showWordCardTool,
     setCardModeTool,
@@ -844,5 +946,7 @@ export const samuelAgent = new RealtimeAgent({
     writePluginTool,
     removePluginTool,
     listPluginsTool,
+    webSearchTool,
+    webReadTool,
   ],
 });

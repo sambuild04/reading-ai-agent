@@ -153,6 +153,37 @@ export function pauseSong() {
 }
 
 // ---------------------------------------------------------------------------
+// Lyrics Viewer bridge
+// ---------------------------------------------------------------------------
+
+type ToggleLyricsFn = (visible: boolean) => void;
+let toggleLyricsFn: ToggleLyricsFn | null = null;
+
+export function registerToggleLyrics(fn: ToggleLyricsFn | null) {
+  toggleLyricsFn = fn;
+}
+
+export function toggleLyricsView(visible: boolean): boolean {
+  if (!toggleLyricsFn) return false;
+  toggleLyricsFn(visible);
+  return true;
+}
+
+type SetLyricsContentFn = (title: string, lines: string[]) => void;
+let setLyricsContentFn: SetLyricsContentFn | null = null;
+
+export function registerSetLyricsContent(fn: SetLyricsContentFn | null) {
+  setLyricsContentFn = fn;
+}
+
+/** Push arbitrary lyrics text into the viewer (e.g. from a web search). */
+export function setLyricsContent(title: string, lines: string[]): boolean {
+  if (!setLyricsContentFn) return false;
+  setLyricsContentFn(title, lines);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Show Word Card bridge (on-demand, tool-driven)
 // ---------------------------------------------------------------------------
 

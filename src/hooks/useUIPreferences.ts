@@ -15,6 +15,8 @@ export interface UIPreferences {
   romaji_visible: boolean;
   reading_visible: boolean;   // furigana/pinyin
   teach_font_size: number;    // px, default 14
+  screen_watch_enabled: boolean;
+  audio_listen_enabled: boolean;
 }
 
 const DEFAULTS: UIPreferences = {
@@ -28,6 +30,8 @@ const DEFAULTS: UIPreferences = {
   romaji_visible: true,
   reading_visible: true,
   teach_font_size: 14,
+  screen_watch_enabled: true,
+  audio_listen_enabled: true,
 };
 
 function loadPrefs(): UIPreferences {
@@ -178,6 +182,15 @@ export function useUIPreferences(): UseUIPreferencesReturn {
           if (property === "font_size" || property === "size") {
             const v = resolveValue(prev.teach_font_size, value, 2);
             next.teach_font_size = isNaN(v) ? DEFAULTS.teach_font_size : clamp(v, 10, 28);
+          }
+        }
+
+        // Privacy controls
+        if (component === "privacy") {
+          if (property === "screen_watch_enabled") {
+            next.screen_watch_enabled = value.toLowerCase() !== "false" && value.toLowerCase() !== "off";
+          } else if (property === "audio_listen_enabled") {
+            next.audio_listen_enabled = value.toLowerCase() !== "false" && value.toLowerCase() !== "off";
           }
         }
 

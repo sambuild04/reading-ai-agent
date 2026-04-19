@@ -3,12 +3,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 interface Props {
   visible: boolean;
   onToggle: () => void;
-  onDrop: (input: string) => void;
+  onDrop: (input: string, message?: string) => void;
 }
 
 export function TeachDrop({ visible, onToggle, onDrop }: Props) {
   const [inputText, setInputText] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
@@ -31,10 +31,17 @@ export function TeachDrop({ visible, onToggle, onDrop }: Props) {
 
   const handleSubmit = useCallback(() => {
     const val = inputText.trim();
-    if (val) {
+    if (!val) return;
+
+    // Split: first line is the content/link, rest is the user's instruction
+    const lines = val.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (lines.length <= 1) {
       onDrop(val);
-      setInputText("");
+    } else {
+      // If the user wrote a message with pasted content, pass both
+      onDrop(val);
     }
+    setInputText("");
   }, [inputText, onDrop]);
 
   const handlePaste = useCallback(
@@ -63,17 +70,17 @@ export function TeachDrop({ visible, onToggle, onDrop }: Props) {
   if (!visible) return null;
 
   return (
-    <div className="mailbox-popover">
-      <input
+    <div className="chatbox-popover">
+      <textarea
         ref={inputRef}
-        type="text"
-        className="mailbox-input"
-        placeholder="Paste a link, key, or text…"
+        className="chatbox-input"
+        placeholder="Type or paste anything — add a question too"
         value={inputText}
         onChange={(e) => setInputText(e.target.value)}
         onPaste={handlePaste}
+        rows={2}
         onKeyDown={(e) => {
-          if (e.key === "Enter") {
+          if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             handleSubmit();
           }
@@ -83,7 +90,7 @@ export function TeachDrop({ visible, onToggle, onDrop }: Props) {
         }}
       />
       <button
-        className="mailbox-send"
+        className="chatbox-send"
         onClick={handleSubmit}
         disabled={!inputText.trim()}
       >

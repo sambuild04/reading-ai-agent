@@ -1,6 +1,10 @@
-# Samuel — Your Always-On AI Assistant That Lives on Your Desktop
+# Screen Voice Agent — open-source desktop AI agent that watches your screen, listens to audio, and teaches languages by voice
 
-A voice-first AI agent that watches your screen, listens to your audio, learns your preferences, and can teach itself new skills at runtime — no rebuild required.
+An always-on voice AI assistant for macOS that uses GPT-4o Vision to see your screen, OpenAI Realtime API for natural voice conversation, and writes its own tools at runtime. Built with Tauri v2, React, and TypeScript. MIT licensed.
+
+**Use cases:** ambient language learning (Japanese, Korean, Spanish), live meeting interpretation, real-time anime/video translation, hands-free desktop assistance, AI tutoring while watching content.
+
+Internally, the agent answers to **"Hey Samuel."**
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![macOS](https://img.shields.io/badge/platform-macOS-black.svg)
@@ -99,24 +103,49 @@ You:     "Summarize the key decisions"
 
 One recording. Any question. Samuel holds the full transcript and applies his reasoning to whatever you ask — no hardcoded analysis pipeline.
 
+### Web Browsing — Search and Read Like a Human
+
+Samuel can search the internet and read web pages on his own:
+
+```
+You:     "Search for the lyrics of 冷たく暗い by Aimer"
+Samuel:  *searches DuckDuckGo → finds lyrics page → reads it → shows lyrics in floating panel*
+
+You:     "Look up the N3 grammar point ～ようにする"
+Samuel:  *searches → reads a grammar explanation site → teaches you with examples*
+
+You:     "What's the weather API endpoint for wttr.in?"
+Samuel:  *searches → reads the docs → tells you*
+```
+
+Not limited to language learning — Samuel can find anything a human can Google. Lyrics, documentation, articles, definitions.
+
 ### Song Teaching Mode
 
-Drop a YouTube link into the envelope and Samuel becomes a music tutor:
+Drop a YouTube link into the chat box and Samuel becomes a music tutor:
 
-1. Downloads audio via `yt-dlp`, fetches synced lyrics from LRCLIB (falls back to Whisper transcription)
+1. Downloads audio via `yt-dlp`, searches the internet for lyrics (lyrics.ovh + LRCLIB + Genius, falls back to Whisper)
 2. You say "play the first 3 lines" — original audio plays, mic auto-mutes
 3. Audio finishes → mic unmutes → Samuel explains the vocabulary and grammar
-4. Fully conversational — ask "what does that word mean?", "play it again", "skip to the chorus"
+4. Lyrics display in a floating HUD panel — tap any line to play that segment
+5. Fully conversational — ask "what does that word mean?", "play it again", "skip to the chorus"
 
-### Teach Me From This — Drop Anything
+### Chat Box — Drop Anything, Ask Anything
 
-Drop content into Samuel's envelope (the icon below his avatar):
+Tap the chat icon below Samuel's avatar to type or paste content with your own question:
 
+- **Text + question** → paste `冷たく暗い 光を湛えた眼` and type "what is this?" → Samuel explains
 - **YouTube link** → song teaching mode with audio playback + lyrics
 - **Article URL** → extracts text, annotates vocabulary and grammar
 - **Image / manga** → OCR + breakdown
-- **Raw text** → immediate analysis
 - **API key** → Samuel asks what it's for and stores it securely
+- **Any message** → just chat via text instead of voice
+
+### Privacy Controls
+
+Settings button (top-right corner) lets you directly toggle:
+- **Screen watching** — whether Samuel observes your screen for language hints
+- **Audio listening** — whether Samuel hears ambient audio for learning
 
 ### Ambient Language Assistance
 
@@ -175,6 +204,8 @@ When Samuel spots a word, a vocab card appears. Tap "Save it" — he saves the a
 | `record_correction` | Stores behavioral corrections |
 | `mark_vocabulary_known` | Permanently suppresses known words |
 | `update_ui` | Changes visual settings by voice |
+| `web_search` / `web_read` | Searches the internet and reads web pages |
+| `show_lyrics` | Displays lyrics/text in the floating HUD panel |
 | `propose_plugin` / `write_plugin` | Self-modification pipeline |
 | `store_secret` | Saves API keys for plugins |
 | `pronounce` | Speaks correct pronunciation |
@@ -192,7 +223,8 @@ When Samuel spots a word, a vocab card appears. Tap "Save it" — he saves the a
 | Vision | GPT-4o Vision |
 | Plugin Runtime | `new Function()` + secrets injection |
 | Song Audio | [yt-dlp](https://github.com/yt-dlp/yt-dlp) + HTML5 Audio |
-| Lyrics | [LRCLIB](https://lrclib.net) + YouTube oEmbed |
+| Lyrics | [lyrics.ovh](https://lyrics.ovh) + [LRCLIB](https://lrclib.net) + [Genius](https://genius.com) |
+| Web Browsing | DuckDuckGo (search) + curl (page reading) |
 | Animation | [Rive](https://rive.app) |
 | Screen Capture | [Peekaboo](https://github.com/nicklama/peekaboo) + macOS `screencapture` |
 | Audio Capture | ScreenCaptureKit (Swift), PID-level filtering |
@@ -247,7 +279,7 @@ Say **"Hey Samuel"** and start talking.
 - **macOS only** — depends on ScreenCaptureKit, Peekaboo, and macOS APIs
 - **Plugins are not OS-sandboxed** — `new Function()` has full JS access; the approval flow is the current security boundary
 - **Dynamic plugins are JS only** — new native capabilities (Swift/Rust) still require a rebuild
-- **LRCLIB coverage** — not all songs have synced lyrics; Whisper transcription is the fallback
+- **Lyrics coverage** — Genius provides accurate text for most songs; LRCLIB adds timestamps; Whisper is the final fallback
 - **Always-on costs** — ambient mode runs continuously; costs accumulate while active
 
 ---
@@ -262,6 +294,46 @@ Say **"Hey Samuel"** and start talking.
 - [ ] Local on-device wake word (zero API cost)
 - [ ] Windows + Linux support
 - [ ] iOS / Android companion app
+
+---
+
+## How It Compares
+
+| Tool | Voice | Screen Vision | Audio Listening | Self-Modifying | Open Source |
+|---|---|---|---|---|---|
+| **Screen Voice Agent** | Yes | Yes | Yes | Yes | Yes (MIT) |
+| Granola | No | No | Yes | No | No |
+| Cluely | No | Yes | Yes | No | No |
+| Otter.ai | No | No | Yes | No | No |
+| ChatGPT Voice | Yes | Partial | No | No | No |
+
+---
+
+## FAQ
+
+**What is this project?**
+Screen Voice Agent is an open-source macOS desktop AI agent that continuously sees your screen and hears your audio, lets you talk to it via voice, and can write its own new tools at runtime without rebuilding.
+
+**What can I use it for?**
+Common uses include learning a language while watching anime or YouTube, having an AI explain what's happening in a meeting in real time, asking questions about content on your screen without screenshotting, searching the web for lyrics or information by voice, and having a hands-free coding or writing assistant.
+
+**How is this different from Granola, Cluely, or Otter?**
+Granola and Otter are meeting-transcription tools. Cluely is an exam/interview overlay. This agent is an always-on companion that combines screen vision, audio listening, voice conversation, persistent memory, and runtime self-modification — designed for ambient assistance, not single-purpose tasks.
+
+**What models does it use?**
+OpenAI Realtime API for voice, GPT-4o Vision for screen capture analysis, GPT-4o-mini for annotations, Whisper for transcription.
+
+**Is it free?**
+The code is MIT-licensed and free. You pay OpenAI API costs directly — typically $0.02-0.05/min when ambient features are active.
+
+**Does it work on Windows or Linux?**
+Currently macOS only. Windows and Linux are on the roadmap.
+
+**What does "self-modifying" mean?**
+You can ask the agent to add a new capability ("add a weather tool") and it generates the code, asks for your approval, and hot-loads it into the running session. No rebuild required.
+
+**Is my data private?**
+Screen captures and audio are sent to OpenAI's APIs for processing. Memory, preferences, and secrets are stored locally in `~/.samuel/`. Nothing is sent to third-party servers besides OpenAI.
 
 ---
 

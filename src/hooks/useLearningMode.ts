@@ -26,6 +26,8 @@ export function useLearningMode(
   vocabCardIntervalSec?: number,
   agentState?: "idle" | "listening" | "thinking" | "speaking",
   cardMode: VocabCardMode = "manual",
+  screenWatchEnabled = true,
+  audioListenEnabled = true,
 ): UseLearningModeReturn {
   const proactiveGapMs = vocabCardIntervalSec
     ? vocabCardIntervalSec * 1000
@@ -37,6 +39,10 @@ export function useLearningMode(
   cardModeRef.current = cardMode;
   const proactiveGapRef = useRef(proactiveGapMs);
   proactiveGapRef.current = proactiveGapMs;
+  const screenWatchRef = useRef(screenWatchEnabled);
+  screenWatchRef.current = screenWatchEnabled;
+  const audioListenRef = useRef(audioListenEnabled);
+  audioListenRef.current = audioListenEnabled;
 
   const [language, setLanguage] = useState<string | null>(
     () => localStorage.getItem(STORAGE_KEY) || null,
@@ -65,10 +71,9 @@ export function useLearningMode(
     return () => registerLearningLanguage(null);
   }, [updateLanguage]);
 
-  // Audio recorder runs whenever learning language is set — independent of session.
-  // Captures audio even before Samuel is awake.
+  // Audio recorder runs whenever learning language is set AND audio listening is enabled.
   useEffect(() => {
-    if (language) {
+    if (language && audioListenEnabled) {
       invoke("start_learning_audio").catch((e) =>
         console.warn("[learning-mode] failed to start audio:", e),
       );
@@ -78,7 +83,7 @@ export function useLearningMode(
     return () => {
       invoke("stop_learning_audio").catch(() => {});
     };
-  }, [language]);
+  }, [language, audioListenEnabled]);
 
   // Tracks when the session started (for warmup gating)
   const sessionStartRef = useRef(0);
@@ -103,14 +108,14 @@ export function useLearningMode(
       checkInFlightRef.current = true;
 
       try {
-        // Run audio and screen checks in parallel
+        const noAudio: AudioCheckResult = { transcript: null, hint: null, clip_path: null };
         const [audioResult, screenHint] = await Promise.all([
-          invoke<AudioCheckResult>("check_learning_audio", { language }).catch(
-            () => ({ transcript: null, hint: null, clip_path: null }) as AudioCheckResult,
-          ),
-          invoke<string | null>("check_screen_for_language", { language }).catch(
-            () => null,
-          ),
+          audioListenRef.current
+            ? invoke<AudioCheckResult>("check_learning_audio", { language }).catch(() => noAudio)
+            : Promise.resolve(noAudio),
+          screenWatchRef.current
+            ? invoke<string | null>("check_screen_for_language", { language }).catch(() => null)
+            : Promise.resolve(null),
         ]);
 
         // Feed transcript to the viewing assessment window

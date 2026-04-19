@@ -96,6 +96,9 @@ pub fn run() {
             set_secret,
             delete_secret,
             list_secrets,
+            fetch_genius_lyrics,
+            web_search,
+            web_read,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

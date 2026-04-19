@@ -12,6 +12,21 @@ interface SongPlaybackDeps {
   player: UseAudioPlayerReturn;
 }
 
+function estimateAvgLineDuration(lines: ContentLine[]): number {
+  const durations: number[] = [];
+  for (let i = 1; i < lines.length - 1; i++) {
+    const cur = lines[i].timestamp;
+    const next = lines[i + 1].timestamp;
+    if (cur !== null && next !== null && next > cur) {
+      durations.push(next - cur);
+    }
+  }
+  if (durations.length === 0) return 8;
+  durations.sort((a, b) => a - b);
+  // Use median to avoid outliers (long pauses between sections)
+  return durations[Math.floor(durations.length / 2)];
+}
+
 export function useSongPlayback({
   lines,
   player,
@@ -30,15 +45,30 @@ export function useSongPlayback({
       const to = Math.min(lines.length - 1, toLine - 1);
       if (from > to) { onDone?.(); return; }
 
-      // Use synced timestamps when available; fall back to start=0 with ~8s per line
+      // Estimate average line duration from the middle of the song (skip first/last
+      // which may include intro/outro gaps). Used for intro skip and fallback timing.
+      const avgLineDur = estimateAvgLineDuration(lines);
+
       const rawStart = lines[from].timestamp;
-      const rawEnd =
+      const nextLineTs =
         to + 1 < lines.length && lines[to + 1].timestamp !== null
           ? lines[to + 1].timestamp!
           : null;
 
-      const startSec = rawStart ?? 0;
-      const endSec = rawEnd !== null ? rawEnd : startSec + (to - from + 1) * 8;
+      let startSec = rawStart ?? 0;
+
+      // Intro skip heuristic: if we're playing from line 1, its timestamp is near 0,
+      // and the gap to line 2 is much larger than a typical line (~3x avg), then
+      // the song has an instrumental intro. Jump forward so playback starts shortly
+      // before the vocals instead of from the very beginning.
+      if (from === 0 && startSec < 3 && nextLineTs !== null && nextLineTs > avgLineDur * 3) {
+        startSec = Math.max(0, nextLineTs - avgLineDur - 2);
+        console.log(`[song] intro skip: jumping to ${startSec.toFixed(1)}s (line 2 at ${nextLineTs}s)`);
+      }
+
+      // Add a small buffer (1.5s) past the next line's start so the current line's
+      // audio finishes naturally instead of cutting off at the exact boundary.
+      const endSec = nextLineTs !== null ? nextLineTs + 1.5 : startSec + (to - from + 1) * Math.max(avgLineDur, 6);
 
       console.log(`[song] playing lines ${fromLine}-${toLine} (${startSec}s → ${endSec}s)`);
       playingRef.current = true;

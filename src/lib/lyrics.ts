@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import type { ContentLine } from "../hooks/useTeachMode";
 
 // ── YouTube metadata via oEmbed ──────────────────────────────────────────────
@@ -36,31 +37,25 @@ export async function fetchYouTubeMeta(url: string): Promise<YouTubeMeta> {
 // ── Parse song name from YouTube title ───────────────────────────────────────
 
 function parseSongInfo(title: string, author: string): { track: string; artist: string } {
-  // Common patterns: "Song Name / Artist", "Artist - Song Name",
-  // "TVアニメ「Show」OP/ED「Song Name」", "Song Name (feat. X)"
   let track = title;
   let artist = author;
 
-  // Strip common suffixes: [Official Video], (MV), 【MV】, etc.
   track = track
     .replace(/\s*[\[【(（].*?(official|mv|music video|pv|full|lyric|ノンクレジット|OP|ED|opening|ending).*?[\]】)）]/gi, "")
     .trim();
 
-  // Try "Artist - Song" pattern
   const dashMatch = track.match(/^(.+?)\s*[-–—]\s*(.+)$/);
   if (dashMatch) {
     artist = dashMatch[1].trim();
     track = dashMatch[2].trim();
   }
 
-  // Try "Song / Artist" pattern (common in J-pop)
   const slashMatch = track.match(/^(.+?)\s*\/\s*(.+)$/);
   if (slashMatch) {
     track = slashMatch[1].trim();
     artist = slashMatch[2].trim();
   }
 
-  // Extract from 「Song Name」brackets
   const bracketMatch = track.match(/「(.+?)」/);
   if (bracketMatch) {
     track = bracketMatch[1].trim();
@@ -69,7 +64,25 @@ function parseSongInfo(title: string, author: string): { track: string; artist: 
   return { track, artist };
 }
 
-// ── LRCLIB lookup ────────────────────────────────────────────────────────────
+// ── Simple internet lyrics search ───────────────────────────────────────────
+// lyrics.ovh — free, no auth, aggregates from Genius / AZLyrics / Lyrics.com
+
+async function searchLyricsOvh(artist: string, track: string): Promise<string | null> {
+  try {
+    const url = `https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(track)}`;
+    console.log("[lyrics] lyrics.ovh:", url);
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const text = data.lyrics?.trim();
+    return text && text.length > 20 ? text : null;
+  } catch (e) {
+    console.log("[lyrics] lyrics.ovh failed:", e);
+    return null;
+  }
+}
+
+// ── LRCLIB — synced timestamps ──────────────────────────────────────────────
 
 interface LrcLibResult {
   syncedLyrics: string | null;
@@ -79,52 +92,65 @@ interface LrcLibResult {
 }
 
 async function searchLrcLib(track: string, artist: string): Promise<LrcLibResult | null> {
-  // Try exact match first
-  const exactUrl = `https://lrclib.net/api/get?track_name=${encodeURIComponent(track)}&artist_name=${encodeURIComponent(artist)}`;
-  console.log("[lyrics] LRCLIB exact:", exactUrl);
+  try {
+    const exactUrl = `https://lrclib.net/api/get?track_name=${encodeURIComponent(track)}&artist_name=${encodeURIComponent(artist)}`;
+    console.log("[lyrics] LRCLIB exact:", exactUrl);
 
-  let res = await fetch(exactUrl);
-  if (res.ok) {
-    const data = await res.json();
-    if (data.syncedLyrics || data.plainLyrics) {
-      return {
-        syncedLyrics: data.syncedLyrics,
-        plainLyrics: data.plainLyrics,
-        trackName: data.trackName ?? track,
-        artistName: data.artistName ?? artist,
-      };
+    let res = await fetch(exactUrl);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.syncedLyrics || data.plainLyrics) {
+        return {
+          syncedLyrics: data.syncedLyrics,
+          plainLyrics: data.plainLyrics,
+          trackName: data.trackName ?? track,
+          artistName: data.artistName ?? artist,
+        };
+      }
     }
-  }
 
-  // Try search endpoint for fuzzy match
-  const searchUrl = `https://lrclib.net/api/search?q=${encodeURIComponent(`${track} ${artist}`)}`;
-  console.log("[lyrics] LRCLIB search:", searchUrl);
+    const searchUrl = `https://lrclib.net/api/search?q=${encodeURIComponent(`${track} ${artist}`)}`;
+    console.log("[lyrics] LRCLIB search:", searchUrl);
 
-  res = await fetch(searchUrl);
-  if (res.ok) {
-    const results = await res.json();
-    if (Array.isArray(results) && results.length > 0) {
-      const best = results[0];
-      return {
-        syncedLyrics: best.syncedLyrics,
-        plainLyrics: best.plainLyrics,
-        trackName: best.trackName ?? track,
-        artistName: best.artistName ?? artist,
-      };
+    res = await fetch(searchUrl);
+    if (res.ok) {
+      const results = await res.json();
+      if (Array.isArray(results) && results.length > 0) {
+        const best = results[0];
+        return {
+          syncedLyrics: best.syncedLyrics,
+          plainLyrics: best.plainLyrics,
+          trackName: best.trackName ?? track,
+          artistName: best.artistName ?? artist,
+        };
+      }
     }
+  } catch (e) {
+    console.log("[lyrics] LRCLIB failed:", e);
   }
 
   return null;
 }
 
-// ── Parse LRC format ─────────────────────────────────────────────────────────
+// ── Genius via Rust backend (backup for when APIs miss) ─────────────────────
+
+async function searchGenius(track: string, artist: string): Promise<string | null> {
+  try {
+    const text = await invoke<string>("fetch_genius_lyrics", { track, artist });
+    return text && text.trim().length > 20 ? text.trim() : null;
+  } catch (e) {
+    console.log("[lyrics] Genius failed:", e);
+    return null;
+  }
+}
+
+// ── Parsers ─────────────────────────────────────────────────────────────────
 
 function parseSyncedLyrics(lrc: string): ContentLine[] {
   const lines: ContentLine[] = [];
   let idx = 0;
 
   for (const raw of lrc.split("\n")) {
-    // "[00:12.34] lyrics text" or "[00:12.345] lyrics text"
     const match = raw.match(/^\[(\d+):(\d+)\.(\d+)\]\s*(.*)$/);
     if (!match) continue;
 
@@ -150,6 +176,31 @@ function parsePlainLyrics(text: string): ContentLine[] {
     .map((l, i) => ({ text: l.trim(), timestamp: null, source_index: i }));
 }
 
+// ── Merge plain text with synced timestamps ─────────────────────────────────
+
+function mergeTextWithTimestamps(plainText: string, lrcSynced: string): ContentLine[] {
+  const textLines = plainText
+    .split("\n")
+    .filter((l) => l.trim().length > 0)
+    .map((l) => l.trim());
+
+  const lrcLines = parseSyncedLyrics(lrcSynced);
+
+  if (lrcLines.length > 0 && Math.abs(textLines.length - lrcLines.length) <= Math.max(3, lrcLines.length * 0.25)) {
+    return textLines.map((text, i) => ({
+      text,
+      timestamp: i < lrcLines.length ? lrcLines[i].timestamp : null,
+      source_index: i,
+    }));
+  }
+
+  return textLines.map((text, i) => ({
+    text,
+    timestamp: null,
+    source_index: i,
+  }));
+}
+
 // ── Main: fetch lyrics for a YouTube URL ─────────────────────────────────────
 
 export interface LyricsResult {
@@ -158,7 +209,7 @@ export interface LyricsResult {
   artist: string;
   videoId: string;
   synced: boolean;
-  source: "lrclib" | "whisper" | "none";
+  source: string;
 }
 
 export async function fetchLyricsForYouTube(
@@ -172,44 +223,69 @@ export async function fetchLyricsForYouTube(
   const { track, artist } = parseSongInfo(meta.title, meta.author);
   console.log("[lyrics] parsed:", track, "by", artist);
 
-  onProgress("Looking up lyrics…");
-  const lrcResult = await searchLrcLib(track, artist);
+  onProgress("Searching for lyrics…");
 
-  if (lrcResult) {
-    console.log("[lyrics] LRCLIB hit:", lrcResult.trackName, "synced:", !!lrcResult.syncedLyrics);
+  // Search all sources in parallel — simple internet lookups
+  const [lrcResult, ovhText, geniusText] = await Promise.all([
+    searchLrcLib(track, artist),
+    searchLyricsOvh(artist, track),
+    searchGenius(track, artist),
+  ]);
 
-    if (lrcResult.syncedLyrics) {
-      const lines = parseSyncedLyrics(lrcResult.syncedLyrics);
-      if (lines.length > 0) {
-        return {
-          lines,
-          title: `${lrcResult.trackName} — ${lrcResult.artistName}`,
-          artist: lrcResult.artistName,
-          videoId: meta.videoId,
-          synced: true,
-          source: "lrclib",
-        };
-      }
-    }
+  // Pick the best text: lyrics.ovh > genius > lrclib plain
+  const bestText = ovhText ?? geniusText ?? lrcResult?.plainLyrics ?? null;
+  const textSource = ovhText ? "lyrics.ovh" : geniusText ? "genius" : lrcResult?.plainLyrics ? "lrclib" : null;
 
-    if (lrcResult.plainLyrics) {
-      const lines = parsePlainLyrics(lrcResult.plainLyrics);
-      if (lines.length > 0) {
-        return {
-          lines,
-          title: `${lrcResult.trackName} — ${lrcResult.artistName}`,
-          artist: lrcResult.artistName,
-          videoId: meta.videoId,
-          synced: false,
-          source: "lrclib",
-        };
-      }
+  const displayTitle = lrcResult
+    ? `${lrcResult.trackName} — ${lrcResult.artistName}`
+    : meta.title;
+  const displayArtist = lrcResult?.artistName ?? artist;
+
+  // Best case: accurate text + synced timestamps
+  if (bestText && lrcResult?.syncedLyrics) {
+    console.log(`[lyrics] merging ${textSource} text with LRCLIB timestamps`);
+    const lines = mergeTextWithTimestamps(bestText, lrcResult.syncedLyrics);
+    const hasTimes = lines.some((l) => l.timestamp !== null);
+    return {
+      lines,
+      title: displayTitle,
+      artist: displayArtist,
+      videoId: meta.videoId,
+      synced: hasTimes,
+      source: `${textSource}+lrclib`,
+    };
+  }
+
+  // LRCLIB synced only (timestamps + its own text)
+  if (lrcResult?.syncedLyrics) {
+    console.log("[lyrics] using LRCLIB synced");
+    const lines = parseSyncedLyrics(lrcResult.syncedLyrics);
+    if (lines.length > 0) {
+      return {
+        lines,
+        title: displayTitle,
+        artist: displayArtist,
+        videoId: meta.videoId,
+        synced: true,
+        source: "lrclib",
+      };
     }
   }
 
-  console.log("[lyrics] no lyrics found on LRCLIB");
+  // Plain text from any source (no timestamps)
+  if (bestText) {
+    console.log(`[lyrics] using ${textSource} (no timestamps)`);
+    return {
+      lines: parsePlainLyrics(bestText),
+      title: displayTitle,
+      artist: displayArtist,
+      videoId: meta.videoId,
+      synced: false,
+      source: textSource!,
+    };
+  }
 
-  // No lyrics found — return empty so the backend can try Whisper as fallback
+  console.log("[lyrics] no lyrics found from any source");
   return {
     lines: [],
     title: meta.title,

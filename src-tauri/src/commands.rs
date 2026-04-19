@@ -1922,3 +1922,387 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
         clip_path: saved_clip_path,
     })
 }
+
+// ── Web browsing — search + read ────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct SearchResult {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+}
+
+/// Search the web via DuckDuckGo and return top results.
+#[tauri::command]
+pub async fn web_search(query: String) -> Result<Vec<SearchResult>, String> {
+    eprintln!("[web] searching: {query}");
+
+    let encoded = urlencoding(&query);
+    let url = format!("https://html.duckduckgo.com/html/?q={encoded}");
+
+    let out = Command::new("/usr/bin/curl")
+        .args([
+            "-s", "--max-time", "10", "-L",
+            "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+            &url,
+        ])
+        .output()
+        .map_err(|e| format!("curl: {e}"))?;
+
+    if !out.status.success() {
+        return Err("Search request failed".into());
+    }
+
+    let html = String::from_utf8_lossy(&out.stdout);
+    let results = parse_ddg_results(&html);
+    eprintln!("[web] found {} results", results.len());
+    Ok(results)
+}
+
+fn parse_ddg_results(html: &str) -> Vec<SearchResult> {
+    let mut results = Vec::new();
+    let marker = "class=\"result__a\"";
+    let mut pos = 0;
+
+    while let Some(idx) = html[pos..].find(marker) {
+        let abs = pos + idx;
+
+        // Extract href
+        let before = &html[abs.saturating_sub(200)..abs];
+        let href = before.rfind("href=\"")
+            .and_then(|h| {
+                let start = h + 6;
+                let slice = &before[start..];
+                slice.find('"').map(|end| slice[..end].to_string())
+            });
+
+        // Extract title text (between > and </a>)
+        let after_marker = &html[abs..];
+        let title = after_marker.find('>')
+            .and_then(|gt| {
+                let content_start = gt + 1;
+                after_marker[content_start..].find("</a>").map(|end| {
+                    strip_html_to_text(&after_marker[content_start..content_start + end])
+                        .trim()
+                        .to_string()
+                })
+            });
+
+        // Extract snippet from result__snippet
+        let snippet_text = html[abs..].find("class=\"result__snippet\"")
+            .and_then(|s_idx| {
+                let s_abs = abs + s_idx;
+                html[s_abs..].find('>').and_then(|gt| {
+                    let start = s_abs + gt + 1;
+                    html[start..].find("</").map(|end| {
+                        strip_html_to_text(&html[start..start + end])
+                            .trim()
+                            .to_string()
+                    })
+                })
+            })
+            .unwrap_or_default();
+
+        if let (Some(mut url), Some(title)) = (href, title) {
+            if !title.is_empty() {
+                // DuckDuckGo wraps URLs in a redirect; extract the real URL
+                if let Some(u_start) = url.find("uddg=") {
+                    let raw = &url[u_start + 5..];
+                    let end = raw.find('&').unwrap_or(raw.len());
+                    if let Ok(decoded) = urlencoding_decode(&raw[..end]) {
+                        url = decoded;
+                    }
+                }
+                results.push(SearchResult {
+                    title,
+                    url,
+                    snippet: snippet_text,
+                });
+                if results.len() >= 8 {
+                    break;
+                }
+            }
+        }
+
+        pos = abs + marker.len();
+    }
+
+    results
+}
+
+fn urlencoding_decode(s: &str) -> Result<String, String> {
+    let mut out = String::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = hex_val(bytes[i + 1]).ok_or("bad hex")?;
+            let lo = hex_val(bytes[i + 2]).ok_or("bad hex")?;
+            out.push((hi << 4 | lo) as char);
+            i += 3;
+        } else if bytes[i] == b'+' {
+            out.push(' ');
+            i += 1;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    Ok(out)
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(10 + b - b'a'),
+        b'A'..=b'F' => Some(10 + b - b'A'),
+        _ => None,
+    }
+}
+
+/// Fetch a web page and return its readable text content.
+#[tauri::command]
+pub async fn web_read(url: String) -> Result<String, String> {
+    eprintln!("[web] reading: {url}");
+
+    let out = Command::new("/usr/bin/curl")
+        .args([
+            "-s", "--max-time", "15", "-L",
+            "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+            &url,
+        ])
+        .output()
+        .map_err(|e| format!("curl: {e}"))?;
+
+    if !out.status.success() {
+        return Err("Failed to fetch page".into());
+    }
+
+    let html = String::from_utf8_lossy(&out.stdout);
+
+    // Extract title
+    let title = extract_html_tag(&html, "title").unwrap_or_default();
+
+    // Strip scripts and styles, then extract readable text
+    let text = extract_readable_text(&html);
+
+    let mut result = String::new();
+    if !title.is_empty() {
+        result.push_str(&title);
+        result.push_str("\n\n");
+    }
+
+    // Cap at ~12k chars to avoid overwhelming the context
+    if text.len() > 12_000 {
+        result.push_str(&text[..12_000]);
+        result.push_str("\n\n[Truncated — page is very long]");
+    } else {
+        result.push_str(&text);
+    }
+
+    eprintln!("[web] extracted {} chars", result.len());
+    Ok(result)
+}
+
+/// Extract readable text from HTML, stripping scripts/styles/tags.
+fn extract_readable_text(html: &str) -> String {
+    let mut text = html.to_string();
+
+    // Remove script and style blocks (case-insensitive, greedy across lines)
+    while let Some(start) = text.to_lowercase().find("<script") {
+        if let Some(end) = text.to_lowercase()[start..].find("</script>") {
+            text.replace_range(start..start + end + 9, " ");
+        } else {
+            break;
+        }
+    }
+    while let Some(start) = text.to_lowercase().find("<style") {
+        if let Some(end) = text.to_lowercase()[start..].find("</style>") {
+            text.replace_range(start..start + end + 8, " ");
+        } else {
+            break;
+        }
+    }
+
+    // Convert block elements to newlines
+    for tag in ["<br", "<p", "<div", "<li", "<h1", "<h2", "<h3", "<h4", "<tr"] {
+        text = text.replace(tag, &format!("\n{tag}"));
+    }
+
+    strip_html_to_text(&text)
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// ── Genius lyrics scraper ───────────────────────────────────────────────────
+
+/// Fetch lyrics text from Genius.com for a given track and artist.
+/// Uses the public Genius search API (no key required) + HTML scraping.
+#[tauri::command]
+pub async fn fetch_genius_lyrics(track: String, artist: String) -> Result<String, String> {
+    let query = format!("{} {}", track, artist);
+    eprintln!("[genius] searching: {query}");
+
+    let search_url = format!(
+        "https://genius.com/api/search/song?q={}&per_page=5",
+        urlencoding(&query)
+    );
+
+    let search_out = Command::new("/usr/bin/curl")
+        .args(["-s", "--max-time", "10", "-L", &search_url])
+        .output()
+        .map_err(|e| format!("curl search: {e}"))?;
+
+    if !search_out.status.success() {
+        return Err("Genius search failed".into());
+    }
+
+    let json: serde_json::Value = serde_json::from_slice(&search_out.stdout)
+        .map_err(|e| format!("parse search JSON: {e}"))?;
+
+    let song_url = extract_first_genius_url(&json)
+        .ok_or("No Genius results found")?;
+    eprintln!("[genius] found: {song_url}");
+
+    let page_out = Command::new("/usr/bin/curl")
+        .args(["-s", "--max-time", "15", "-L", &song_url])
+        .output()
+        .map_err(|e| format!("curl page: {e}"))?;
+
+    if !page_out.status.success() {
+        return Err("Failed to fetch Genius page".into());
+    }
+
+    let html = String::from_utf8_lossy(&page_out.stdout);
+    let lyrics = extract_genius_lyrics_from_html(&html);
+
+    if lyrics.is_empty() {
+        return Err("No lyrics found on Genius page".into());
+    }
+
+    eprintln!("[genius] extracted {} chars of lyrics", lyrics.len());
+    Ok(lyrics)
+}
+
+fn urlencoding(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push_str("%20"),
+            _ => {
+                out.push('%');
+                out.push(char::from(b"0123456789ABCDEF"[(b >> 4) as usize]));
+                out.push(char::from(b"0123456789ABCDEF"[(b & 0xF) as usize]));
+            }
+        }
+    }
+    out
+}
+
+fn extract_first_genius_url(json: &serde_json::Value) -> Option<String> {
+    let sections = json["response"]["sections"].as_array()?;
+    for section in sections {
+        if let Some(hits) = section["hits"].as_array() {
+            for hit in hits {
+                if let Some(url) = hit["result"]["url"].as_str() {
+                    return Some(url.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extract_genius_lyrics_from_html(html: &str) -> String {
+    let marker = "data-lyrics-container=\"true\"";
+    let mut lyrics = String::new();
+    let mut pos = 0;
+
+    while let Some(idx) = html[pos..].find(marker) {
+        let abs = pos + idx;
+
+        // Find the closing > of the opening tag
+        let Some(gt_off) = html[abs..].find('>') else { break };
+        let content_start = abs + gt_off + 1;
+
+        // Walk forward, counting nested <div and </div> to find the matching close
+        let mut depth: i32 = 1;
+        let mut i = content_start;
+        let bytes = html.as_bytes();
+        while i < bytes.len() && depth > 0 {
+            if i + 4 < bytes.len() && &bytes[i..i + 4] == b"<div" {
+                depth += 1;
+                i += 4;
+            } else if i + 6 <= bytes.len() && &bytes[i..i + 6] == b"</div>" {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+                i += 6;
+            } else {
+                i += 1;
+            }
+        }
+
+        if depth == 0 {
+            let raw = &html[content_start..i];
+            let cleaned = strip_html_to_text(raw);
+            if !cleaned.is_empty() {
+                if !lyrics.is_empty() {
+                    lyrics.push('\n');
+                }
+                lyrics.push_str(&cleaned);
+            }
+            pos = i + 6;
+        } else {
+            break;
+        }
+    }
+
+    lyrics.trim().to_string()
+}
+
+/// Strip HTML tags from a Genius lyrics container, converting <br> to newlines.
+fn strip_html_to_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    let bytes = html.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            // Check for <br> variants
+            let rest = &html[i..];
+            if rest.starts_with("<br>") || rest.starts_with("<br/>") || rest.starts_with("<br />") {
+                out.push('\n');
+                i += rest.find('>').unwrap_or(3) + 1;
+                continue;
+            }
+            in_tag = true;
+            i += 1;
+        } else if bytes[i] == b'>' {
+            in_tag = false;
+            i += 1;
+        } else if !in_tag {
+            out.push(bytes[i] as char);
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+
+    // Decode common HTML entities
+    out.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&#x27;", "'")
+        .replace("&apos;", "'")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+}

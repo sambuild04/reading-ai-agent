@@ -12,12 +12,13 @@ import { playChime, playSleep } from "./lib/sounds";
 import { StatusBar } from "./components/StatusBar";
 import { Character } from "./components/Character";
 import { ScreenPicker } from "./components/ScreenPicker";
-import { FlashcardDeck } from "./components/FlashcardDeck";
 import { WordCard } from "./components/WordCard";
 import { TeachDrop } from "./components/TeachDrop";
 import { TeachViewer } from "./components/TeachViewer";
 import { PluginApproval } from "./components/PluginApproval";
-import { sendTextAndRespond, registerTeachContent, registerUIUpdate, registerDismissCard, registerSongPlayback, registerShowWordCard, registerSetCardMode } from "./lib/session-bridge";
+import { SettingsPanel } from "./components/SettingsPanel";
+import { LyricsViewer } from "./components/LyricsViewer";
+import { sendTextAndRespond, registerTeachContent, registerUIUpdate, registerDismissCard, registerSongPlayback, registerShowWordCard, registerSetCardMode, registerToggleLyrics, registerSetLyricsContent } from "./lib/session-bridge";
 import type { WordCardData } from "./lib/session-bridge";
 
 export default function App() {
@@ -37,12 +38,13 @@ export default function App() {
 
   const record = useRecordMode();
   const ui = useUIPreferences();
-  const learning = useLearningMode(status, ui.prefs.vocab_card_interval, agentState, ui.prefs.vocab_card_mode);
+  const learning = useLearningMode(status, ui.prefs.vocab_card_interval, agentState, ui.prefs.vocab_card_mode, ui.prefs.screen_watch_enabled, ui.prefs.audio_listen_enabled);
   const teachMode = useTeachMode();
 
   // Latch song data so it survives teachMode.close() (which nulls content)
   const [songAudioPath, setSongAudioPath] = useState<string | null>(null);
   const [songLines, setSongLines] = useState<import("./hooks/useTeachMode").ContentLine[] | null>(null);
+  const [songTitle, setSongTitle] = useState<string | null>(null);
   const isSongContent = !!teachMode.content?.videoId;
 
   useEffect(() => {
@@ -51,6 +53,7 @@ export default function App() {
     }
     if (teachMode.content?.videoId && teachMode.content.lines.length > 0) {
       setSongLines(teachMode.content.lines);
+      setSongTitle(teachMode.content.title ?? null);
     }
   }, [teachMode.content]);
 
@@ -61,9 +64,15 @@ export default function App() {
   });
 
   const [awaitingWake, setAwaitingWake] = useState(true);
-  const [deckOpen, setDeckOpen] = useState(false);
   const [envelopeOpen, setEnvelopeOpen] = useState(false);
   const [wordCard, setWordCard] = useState<WordCardData | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [lyricsViewOpen, setLyricsViewOpen] = useState(false);
+
+  const handlePrivacyToggle = useCallback((key: "screen_watch_enabled" | "audio_listen_enabled") => {
+    const current = ui.prefs[key];
+    ui.applyUpdate({ component: "privacy", property: key, value: current ? "false" : "true" });
+  }, [ui.prefs, ui.applyUpdate]);
 
   // Register teach content bridge so Samuel's voice tool can trigger teach mode
   useEffect(() => {
@@ -93,7 +102,7 @@ export default function App() {
     return () => registerShowWordCard(null);
   }, []);
 
-  // Register card-mode bridge so Samuel can toggle manual ↔ auto by voice
+  // Register card-mode bridge so Samuel can toggle manual / auto by voice
   useEffect(() => {
     registerSetCardMode((mode, intervalSec) => {
       ui.applyUpdate({ component: "word_card", property: "mode", value: mode });
@@ -103,6 +112,20 @@ export default function App() {
     });
     return () => registerSetCardMode(null);
   }, [ui.applyUpdate]);
+
+  // Register lyrics viewer bridges — toggle visibility + push content from web search
+  useEffect(() => {
+    registerToggleLyrics((visible) => setLyricsViewOpen(visible));
+    registerSetLyricsContent((title, lines) => {
+      setSongTitle(title);
+      setSongLines(lines.map((text, i) => ({ text, timestamp: null, source_index: i })));
+      setLyricsViewOpen(true);
+    });
+    return () => {
+      registerToggleLyrics(null);
+      registerSetLyricsContent(null);
+    };
+  }, []);
 
   // Register song playback bridge — mute mic during playback, unmute when done.
   // Returns a promise so Samuel's tool waits until the segment finishes before speaking.
@@ -265,17 +288,6 @@ export default function App() {
             </div>
           )}
 
-          {/* Flashcard deck button */}
-          {status === "connected" && (
-            <button
-              onClick={() => setDeckOpen(true)}
-              className="rounded-full p-2 bg-white/10 text-indigo-300 hover:text-indigo-200 transition-colors"
-              title="Scene Flashcards"
-            >
-              <DeckIcon />
-            </button>
-          )}
-
           {/* Full controls only when connected and active */}
           {status === "connected" && !awaitingWake && (
             <>
@@ -307,6 +319,15 @@ export default function App() {
               </button>
             </>
           )}
+
+          {/* Settings — always visible */}
+          <button
+            onClick={() => setSettingsOpen(true)}
+            className="rounded-full p-2 bg-white/10 text-slate-400 hover:text-slate-200 transition-colors"
+            title="Settings"
+          >
+            <GearIcon />
+          </button>
         </div>
       </div>
 
@@ -334,11 +355,16 @@ export default function App() {
             onDrop={(input) => {
               setEnvelopeOpen(false);
               sendTextAndRespond(
-                `[System: The user dropped content into the envelope: "${input}". ` +
-                `Identify what this is (YouTube link, article URL, API key/token, raw text, image, etc.) ` +
-                `and respond appropriately. If it's content to study, ask if they want you to teach from it ` +
-                `or use teach_from_content directly. If it looks like an API key or token, ask what it's for ` +
-                `so you can store it with store_secret. If it's something else, ask for context.]`,
+                `[System: The user sent this via the chat input: "${input}". ` +
+                `This could be anything — a question, pasted content with instructions, a YouTube link, ` +
+                `an article URL, an API key, raw text, an image, or a mix of content and a request. ` +
+                `Read the full message to understand what the user wants. ` +
+                `If they included a question or instruction (e.g. "what is this?", "explain this", ` +
+                `"teach me from this"), follow their request. ` +
+                `If it's just a YouTube link with no instruction, start song teaching. ` +
+                `If it looks like an API key or token, ask what it's for so you can store it with store_secret. ` +
+                `If it's content to study, use teach_from_content. ` +
+                `If ambiguous, just respond naturally to what they wrote.]`,
               );
             }}
           />
@@ -348,8 +374,17 @@ export default function App() {
       {/* Tool-driven word card — only shown when Samuel decides to */}
       <WordCard card={wordCard} onDismiss={() => setWordCard(null)} />
 
-      <FlashcardDeck visible={deckOpen} onClose={() => setDeckOpen(false)} />
-
+      {/* Lyrics viewer — shown by Samuel's toggle_lyrics tool */}
+      <LyricsViewer
+        visible={lyricsViewOpen && !!songLines}
+        lines={songLines ?? []}
+        title={songTitle ?? undefined}
+        onClose={() => setLyricsViewOpen(false)}
+        onLineClick={(lineNum) => {
+          mute(true);
+          songPlayback.playLines(lineNum, lineNum, () => mute(false));
+        }}
+      />
 
       {/* TeachViewer only for non-song content (articles, text, images) */}
       {teachMode.state === "ready" && teachMode.content && !isSongContent && (
@@ -362,6 +397,13 @@ export default function App() {
       )}
 
       <PluginApproval />
+
+      <SettingsPanel
+        visible={settingsOpen}
+        prefs={ui.prefs}
+        onToggle={handlePrivacyToggle}
+        onClose={() => setSettingsOpen(false)}
+      />
     </div>
   );
 }
@@ -420,13 +462,11 @@ function ProcessingIcon() {
   );
 }
 
-function DeckIcon() {
+function GearIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="2" y="6" width="20" height="14" rx="2" />
-      <path d="M2 10h20" />
-      <path d="M6 2v4" />
-      <path d="M18 2v4" />
+      <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+      <circle cx="12" cy="12" r="3" />
     </svg>
   );
 }
