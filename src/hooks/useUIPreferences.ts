@@ -17,6 +17,8 @@ export interface UIPreferences {
   teach_font_size: number;    // px, default 14
   screen_watch_enabled: boolean;
   audio_listen_enabled: boolean;
+  local_time_enabled: boolean;
+  location_enabled: boolean;
 }
 
 const DEFAULTS: UIPreferences = {
@@ -32,6 +34,8 @@ const DEFAULTS: UIPreferences = {
   teach_font_size: 14,
   screen_watch_enabled: true,
   audio_listen_enabled: true,
+  local_time_enabled: true,
+  location_enabled: false,
 };
 
 function loadPrefs(): UIPreferences {
@@ -187,10 +191,15 @@ export function useUIPreferences(): UseUIPreferencesReturn {
 
         // Privacy controls
         if (component === "privacy") {
+          const on = value.toLowerCase() !== "false" && value.toLowerCase() !== "off";
           if (property === "screen_watch_enabled") {
-            next.screen_watch_enabled = value.toLowerCase() !== "false" && value.toLowerCase() !== "off";
+            next.screen_watch_enabled = on;
           } else if (property === "audio_listen_enabled") {
-            next.audio_listen_enabled = value.toLowerCase() !== "false" && value.toLowerCase() !== "off";
+            next.audio_listen_enabled = on;
+          } else if (property === "local_time_enabled") {
+            next.local_time_enabled = on;
+          } else if (property === "location_enabled") {
+            next.location_enabled = on;
           }
         }
 

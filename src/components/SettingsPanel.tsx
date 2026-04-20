@@ -1,9 +1,11 @@
 import type { UIPreferences } from "../hooks/useUIPreferences";
 
+type ToggleKey = "screen_watch_enabled" | "audio_listen_enabled" | "local_time_enabled" | "location_enabled";
+
 interface Props {
   visible: boolean;
   prefs: UIPreferences;
-  onToggle: (key: "screen_watch_enabled" | "audio_listen_enabled") => void;
+  onToggle: (key: ToggleKey) => void;
   onClose: () => void;
 }
 
@@ -46,6 +48,36 @@ export function SettingsPanel({ visible, prefs, onToggle, onClose }: Props) {
             <div
               className={`settings-switch ${prefs.audio_listen_enabled ? "settings-switch-on" : ""}`}
               onClick={() => onToggle("audio_listen_enabled")}
+            >
+              <div className="settings-switch-thumb" />
+            </div>
+          </label>
+
+          <label className="settings-toggle-row">
+            <div className="settings-toggle-info">
+              <span className="settings-toggle-label">Local Time</span>
+              <span className="settings-toggle-desc">
+                Allow Samuel to know your local time and timezone
+              </span>
+            </div>
+            <div
+              className={`settings-switch ${prefs.local_time_enabled ? "settings-switch-on" : ""}`}
+              onClick={() => onToggle("local_time_enabled")}
+            >
+              <div className="settings-switch-thumb" />
+            </div>
+          </label>
+
+          <label className="settings-toggle-row">
+            <div className="settings-toggle-info">
+              <span className="settings-toggle-label">Location</span>
+              <span className="settings-toggle-desc">
+                Allow Samuel to know your approximate location for contextual help
+              </span>
+            </div>
+            <div
+              className={`settings-switch ${prefs.location_enabled ? "settings-switch-on" : ""}`}
+              onClick={() => onToggle("location_enabled")}
             >
               <div className="settings-switch-thumb" />
             </div>

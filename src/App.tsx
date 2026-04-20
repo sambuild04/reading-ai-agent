@@ -20,6 +20,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { LyricsViewer } from "./components/LyricsViewer";
 import { sendTextAndRespond, registerTeachContent, registerUIUpdate, registerDismissCard, registerSongPlayback, registerShowWordCard, registerSetCardMode, registerToggleLyrics, registerSetLyricsContent } from "./lib/session-bridge";
 import type { WordCardData } from "./lib/session-bridge";
+import { registerPrivacyPrefsGetter } from "./lib/samuel";
 
 export default function App() {
   const {
@@ -69,10 +70,19 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [lyricsViewOpen, setLyricsViewOpen] = useState(false);
 
-  const handlePrivacyToggle = useCallback((key: "screen_watch_enabled" | "audio_listen_enabled") => {
+  const handlePrivacyToggle = useCallback((key: "screen_watch_enabled" | "audio_listen_enabled" | "local_time_enabled" | "location_enabled") => {
     const current = ui.prefs[key];
     ui.applyUpdate({ component: "privacy", property: key, value: current ? "false" : "true" });
   }, [ui.prefs, ui.applyUpdate]);
+
+  // Expose privacy prefs to Samuel's tools so they can check at call time
+  useEffect(() => {
+    registerPrivacyPrefsGetter(() => ({
+      local_time_enabled: ui.prefs.local_time_enabled,
+      location_enabled: ui.prefs.location_enabled,
+    }));
+    return () => registerPrivacyPrefsGetter(null);
+  }, [ui.prefs.local_time_enabled, ui.prefs.location_enabled]);
 
   // Register teach content bridge so Samuel's voice tool can trigger teach mode
   useEffect(() => {

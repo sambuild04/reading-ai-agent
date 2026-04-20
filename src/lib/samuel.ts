@@ -11,13 +11,23 @@ interface CaptureResult {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Privacy prefs are checked at call time via the getter registered from App
+let getPrivacyPrefs: (() => { local_time_enabled: boolean; location_enabled: boolean }) | null = null;
+export function registerPrivacyPrefsGetter(fn: typeof getPrivacyPrefs) {
+  getPrivacyPrefs = fn;
+}
+
 const getCurrentTimeTool = tool({
   name: "get_current_time",
   description:
     "Get the user's current local date, time, day of week, and timezone. " +
-    "Use this when the user asks what time it is, what day it is, or anything time-related.",
+    "Use this when the user asks what time it is, what day it is, or anything time-related. " +
+    "Respects the user's privacy setting — if disabled, returns a notice.",
   parameters: z.object({}),
   execute() {
+    if (getPrivacyPrefs && !getPrivacyPrefs().local_time_enabled) {
+      return "The user has disabled local time sharing in privacy settings.";
+    }
     const now = new Date();
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     return JSON.stringify({
@@ -26,6 +36,48 @@ const getCurrentTimeTool = tool({
       timezone: tz,
       iso: now.toISOString(),
     });
+  },
+});
+
+const getLocationTool = tool({
+  name: "get_location",
+  description:
+    "Get the user's approximate location (city, region, country) via browser geolocation. " +
+    "Use when context would benefit from knowing where the user is — weather, local recommendations, " +
+    "timezone-aware scheduling, etc. Respects the user's privacy setting.",
+  parameters: z.object({}),
+  async execute() {
+    if (getPrivacyPrefs && !getPrivacyPrefs().location_enabled) {
+      return "The user has disabled location sharing in privacy settings. Ask them to enable it in Settings if needed.";
+    }
+    try {
+      const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, {
+          timeout: 10000,
+          maximumAge: 300000,
+        });
+      });
+      const { latitude, longitude } = pos.coords;
+      // Reverse geocode via free Nominatim API
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json&zoom=10`,
+        { headers: { "User-Agent": "Samuel-Desktop-Agent/1.0" } },
+      );
+      if (res.ok) {
+        const data = await res.json();
+        const addr = data.address ?? {};
+        return JSON.stringify({
+          city: addr.city ?? addr.town ?? addr.village ?? "Unknown",
+          region: addr.state ?? addr.county ?? "",
+          country: addr.country ?? "",
+          latitude: latitude.toFixed(4),
+          longitude: longitude.toFixed(4),
+        });
+      }
+      return JSON.stringify({ latitude: latitude.toFixed(4), longitude: longitude.toFixed(4) });
+    } catch (err) {
+      return `Location unavailable: ${err instanceof Error ? err.message : "permission denied or not supported"}`;
+    }
   },
 });
 
@@ -782,7 +834,7 @@ When the user asks what you can do or how you work, you should accurately descri
 - You can look at any app on screen, translate foreign text, and explain grammar.
 - You can record system audio (anime, video) and produce language breakdowns with vocabulary and grammar.
 - When the user tells you they're learning a language and you store it with remember_preference, the system automatically scans their screen and listens to ambient audio in the background, sending you hints about interesting vocabulary/grammar.
-- You are time-aware and know the user's local time and timezone.
+- You are time-aware and know the user's local time and timezone (if enabled in privacy settings). You can also access their approximate location (if enabled) for contextual help like weather, local recommendations, or timezone-aware features.
 - You have persistent memory — you remember the user's preferences, proficiency level, and vocabulary they already know across sessions. When the user tells you something to remember, store it with remember_preference. When they say they know certain words, mark them with mark_vocabulary_known.
 - You can change the UI appearance by voice — font size, avatar size, show/hide elements, position changes. The user never needs a settings menu; you are the settings panel.
 - You can add new tools to yourself at runtime. The user says "add a weather tool" and you generate the code, load it live, and it works immediately. You can also fix broken plugins and remove unwanted ones.
@@ -929,6 +981,7 @@ export const samuelAgent = new RealtimeAgent({
     startRecordingTool,
     stopRecordingTool,
     getCurrentTimeTool,
+    getLocationTool,
     rememberPreferenceTool,
     markVocabularyKnownTool,
     teachFromContentTool,
