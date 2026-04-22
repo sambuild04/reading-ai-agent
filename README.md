@@ -10,6 +10,8 @@ Internally, the agent answers to **"Hey Samuel."**
 ![macOS](https://img.shields.io/badge/platform-macOS-black.svg)
 ![Tauri v2](https://img.shields.io/badge/Tauri-v2-orange.svg)
 ![OpenAI Realtime API](https://img.shields.io/badge/OpenAI-Realtime%20Voice-412991.svg)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2.svg)](https://github.com/sambuild04/reading-ai-agent/issues/new?title=Discord+invite+request)
+[![Contributors](https://img.shields.io/github/contributors/sambuild04/reading-ai-agent.svg)](https://github.com/sambuild04/reading-ai-agent/graphs/contributors)
 
 > **TL;DR:** Say "Hey Samuel" and talk. He sees your screen, hears your audio, remembers everything, and writes his own tools when he needs new capabilities.
 
@@ -45,6 +47,23 @@ Samuel:  "Done. What's the weather in Tokyo?"
 
 No rebuild. No restart. The new tool is live in the same voice conversation. If a plugin breaks, Samuel reads the error, proposes a fix, and rewrites it — with your approval.
 
+### Procedural Memory — Learns and Reuses Workflows
+
+Samuel doesn't just execute tasks — he remembers how he did them. When he successfully chains multiple tools to solve a complex request, he saves the workflow as a reusable "skill."
+
+```
+You:     "Compare the lyrics with the real ones online and fix any mistakes"
+Samuel:  *searches web → reads lyrics page → compares line by line → corrects 4 lines*
+Samuel:  "Done. I've also saved this as a skill so I can do it faster next time."
+
+         ...next session...
+
+You:     "The lyrics are wrong again"
+Samuel:  *loads saved skill → executes the same workflow in seconds*
+```
+
+Skills are stored as simple markdown files in `~/.samuel/skills/`. You can edit, share, or contribute them.
+
 ### Always Watching, Always Listening
 
 Samuel runs a continuous perception loop in the background:
@@ -79,7 +98,10 @@ Samuel is his own settings panel. No menus, no preferences screen:
 | "Cards every 20 seconds" | Adjusts card frequency |
 | "Only show cards when I ask" | Switches back to manual mode |
 | "Hide the romaji" | Annotations hidden |
+| "Move the lyrics panel to the right" | Lyrics panel repositions |
 | "Reset the UI" | All visual settings restored |
+
+Every UI element — sizes, opacity, colors, positions — is adjustable by voice through a single schema-driven system.
 
 ---
 
@@ -120,15 +142,30 @@ Samuel:  *searches → reads the docs → tells you*
 
 Not limited to language learning — Samuel can find anything a human can Google. Lyrics, documentation, articles, definitions.
 
+### Multi-Step Reasoning — Chains Tools Automatically
+
+Samuel doesn't need explicit instructions for every workflow. Give him a complex request and he chains tools together:
+
+```
+You:     "Compare the lyrics with the real ones online and fix any mistakes"
+Samuel:  *web_search → web_read → compare → correct_lyrics* (4 tools, zero prompting)
+
+You:     "Find a recipe for tonkotsu ramen and save it to a file"
+Samuel:  *web_search → web_read → file_write* (automatic)
+```
+
+When any tool in the chain fails, Samuel follows built-in fallback chains — retrying with alternative approaches before ever telling you something didn't work.
+
 ### Song Teaching Mode
 
 Drop a YouTube link into the chat box and Samuel becomes a music tutor:
 
-1. Downloads audio via `yt-dlp`, searches the internet for lyrics (lyrics.ovh + LRCLIB + Genius, falls back to Whisper)
+1. Downloads audio via `yt-dlp`, searches the internet for lyrics (LRCLIB + Genius, falls back to Whisper transcription)
 2. You say "play the first 3 lines" — original audio plays, mic auto-mutes
 3. Audio finishes → mic unmutes → Samuel explains the vocabulary and grammar
 4. Lyrics display in a floating HUD panel — tap any line to play that segment
 5. Fully conversational — ask "what does that word mean?", "play it again", "skip to the chorus"
+6. If lyrics are wrong, say "the lyrics are wrong" — Samuel searches the web for better ones, compares, and corrects automatically
 
 ### Chat Box — Drop Anything, Ask Anything
 
@@ -151,7 +188,7 @@ Settings button (top-right corner) lets you directly toggle:
 
 Set your learning language once ("I'm learning Japanese") and Samuel assists in the background — forever:
 
-- **Manual mode** (default) — ask Samuel to explain any word; he shows a vocabulary card via `show_word_card`
+- **Manual mode** (default) — ask Samuel to explain any word; he shows a vocabulary card
 - **Auto mode** — say "show me cards while I watch" and Samuel periodically reviews what he hears/sees, picking out interesting words based on your proficiency level
 - **Cross-language hints** — say "tell me the Japanese for any English words you hear" and he does that too
 - **Frequency control** — "cards every 30 seconds" / "less often" / "stop auto cards"
@@ -167,12 +204,13 @@ When Samuel spots a word, a vocab card appears. Tap "Save it" — he saves the a
 ## Architecture
 
 ```
-"Hey Samuel" → Wake word → OpenAI Realtime API → 20+ tools → Voice response
+"Hey Samuel" → Wake word → OpenAI Realtime API → 19 tools → Voice response
                                     ↕
          Screen capture (GPT-4o Vision, change detection, every 20s)
          System audio (ScreenCaptureKit, PID-level filtering)
          Ambient context → silent injection OR periodic Samuel review
          Plugin system: propose → approve → generate → hot-load
+         Skill system: execute workflow → save as reusable skill → replay
          Song playback: yt-dlp → local audio → HTML5 <audio> with seek
          Recording: Whisper transcribe → raw transcript → user-directed analysis
          Secrets store: ~/.samuel/secrets.json (local)
@@ -185,30 +223,33 @@ When Samuel spots a word, a vocab card appears. Tap "Save it" — he saves the a
 | Model | Purpose | Latency |
 |---|---|---|
 | OpenAI Realtime API | Voice conversation, all interactive features | ~500ms |
-| GPT-4o Vision | Screen scanning, ambient observation | ~3–5s |
+| GPT-4o Vision | Screen scanning, ambient observation | ~3-5s |
 | GPT-4o-mini | Annotation, plugin code generation | ~1s |
-| gpt-4o-transcribe | Recording transcription (high-fidelity) | ~3–10s |
-| whisper-1 | Song segmentation with timestamps | ~3–5s |
+| gpt-4o-transcribe | Recording transcription (high-fidelity) | ~3-10s |
+| whisper-1 | Song segmentation with timestamps | ~3-5s |
 
 ### Key Tools Samuel Has
 
+All tools use structured error responses with fallback chains. Related tools are grouped to keep the tool count manageable for the model.
+
 | Tool | What it does |
 |---|---|
-| `observe_screen` | Captures and analyzes what's on screen |
-| `start/stop_recording` | System audio capture + transcription |
-| `teach_from_content` | Analyzes any dropped content for learning |
-| `play_song_lines` / `pause_song` | Controls song audio playback |
-| `show_word_card` | Displays a vocabulary card on demand |
-| `set_card_mode` | Toggles manual/auto vocab card behavior |
-| `remember_preference` | Stores persistent user preferences |
+| `observe_screen` | Captures and analyzes what's on screen (full screenshot or selected text) |
+| `recording` | Start/stop system audio capture + transcription |
+| `teach_from_content` | Analyzes any dropped content (YouTube, URLs, text, images) for learning |
+| `song_control` | Play, pause, show/hide lyrics, refetch lyrics from web, correct lines |
+| `vocab_card` | Show vocabulary cards, dismiss, switch manual/auto mode |
+| `update_ui` / `query_ui_state` | Voice-controlled UI — change any visual property by speaking |
+| `web_browse` | Search the internet and read web pages |
+| `file_op` | Read, write, and list files on disk |
+| `skill_manage` | Save, search, list, read, and delete reusable multi-step workflows |
+| `plugin_manage` | Self-modification — propose, write, remove, list dynamic plugins |
+| `store_secret` | Saves API keys securely for plugins |
+| `remember_preference` | Stores persistent user preferences and facts |
 | `record_correction` | Stores behavioral corrections |
 | `mark_vocabulary_known` | Permanently suppresses known words |
-| `update_ui` | Changes visual settings by voice |
-| `web_search` / `web_read` | Searches the internet and reads web pages |
-| `show_lyrics` | Displays lyrics/text in the floating HUD panel |
-| `propose_plugin` / `write_plugin` | Self-modification pipeline |
-| `store_secret` | Saves API keys for plugins |
-| `pronounce` | Speaks correct pronunciation |
+| `get_recent_actions` | Recalls recent tool calls and outcomes for self-correction |
+| `pronounce` | Speaks correct pronunciation of words |
 
 ---
 
@@ -223,7 +264,7 @@ When Samuel spots a word, a vocab card appears. Tap "Save it" — he saves the a
 | Vision | GPT-4o Vision |
 | Plugin Runtime | `new Function()` + secrets injection |
 | Song Audio | [yt-dlp](https://github.com/yt-dlp/yt-dlp) + HTML5 Audio |
-| Lyrics | [lyrics.ovh](https://lyrics.ovh) + [LRCLIB](https://lrclib.net) + [Genius](https://genius.com) |
+| Lyrics | [LRCLIB](https://lrclib.net) + [Genius](https://genius.com) + web search fallback |
 | Web Browsing | DuckDuckGo (search) + curl (page reading) |
 | Animation | [Rive](https://rive.app) |
 | Screen Capture | [Peekaboo](https://github.com/nicklama/peekaboo) + macOS `screencapture` |
@@ -232,6 +273,8 @@ When Samuel spots a word, a vocab card appears. Tap "Save it" — he saves the a
 ---
 
 ## Quick Start
+
+> **Heads up:** A one-click installer is on the way. For now, install requires building from source. If you want to be notified when the packaged release ships, star this repo or [open an issue](https://github.com/sambuild04/reading-ai-agent/issues/new?title=Notify+me+when+installer+is+ready) saying "notify me."
 
 ### Prerequisites
 
@@ -249,7 +292,7 @@ cd reading-ai-agent
 npm install
 swiftc -o src-tauri/helpers/record-audio src-tauri/helpers/record-audio.swift \
   -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia
-echo '{"apiKey": "sk-..."}' > ~/.books-reader.json
+echo '{"apiKey": "sk-..."}' > ~/.samuel/config.json
 ```
 
 Grant Screen Recording permission: **System Settings → Privacy & Security → Screen Recording** → add Peekaboo + Samuel.
@@ -260,6 +303,8 @@ npm run tauri:dev
 
 Say **"Hey Samuel"** and start talking.
 
+> Stuck on install? [Open an issue](https://github.com/sambuild04/reading-ai-agent/issues/new) or join the [Discord](https://github.com/sambuild04/reading-ai-agent/issues/new?title=Discord+invite+request) — we'll help you through it and improve the docs.
+
 ---
 
 ## API Costs
@@ -267,7 +312,7 @@ Say **"Hey Samuel"** and start talking.
 | Mode | Approx. cost |
 |---|---|
 | Wake word (always listening) | ~$0.006/min |
-| Ambient assistance (screen + audio) | ~$0.02–0.05/min |
+| Ambient assistance (screen + audio) | ~$0.02-0.05/min |
 | Auto card mode (Samuel review) | ~$0.01/review cycle |
 | Plugin code generation | ~$0.001/plugin |
 | Voice conversation | Standard Realtime API pricing |
@@ -279,21 +324,29 @@ Say **"Hey Samuel"** and start talking.
 - **macOS only** — depends on ScreenCaptureKit, Peekaboo, and macOS APIs
 - **Plugins are not OS-sandboxed** — `new Function()` has full JS access; the approval flow is the current security boundary
 - **Dynamic plugins are JS only** — new native capabilities (Swift/Rust) still require a rebuild
-- **Lyrics coverage** — Genius provides accurate text for most songs; LRCLIB adds timestamps; Whisper is the final fallback
+- **Lyrics coverage** — Genius provides accurate text for most songs; LRCLIB adds timestamps; web search and Whisper are fallbacks
 - **Always-on costs** — ambient mode runs continuously; costs accumulate while active
 
 ---
 
 ## Roadmap
 
-- [ ] Plugin marketplace — share and install community plugins
-- [ ] General monitoring mode — "watch this meeting and flag errors" as a first-class feature
-- [ ] SRS scheduling for scene flashcards (spaced repetition on real clips)
-- [ ] Anki export
-- [ ] OS-level sandboxing for dynamic plugins
-- [ ] Local on-device wake word (zero API cost)
-- [ ] Windows + Linux support
-- [ ] iOS / Android companion app
+The vision: an AI that lives where you work, sees what you see, hears what you hear, and gets better at helping you over time. Things we're building toward:
+
+- **One-click installer** — packaged `.dmg`, no compilation. *(in progress)*
+- **MCP support** — connect to Notion, Gmail, Slack, GitHub, and any other MCP server.
+- **Plugin/skill marketplace** — share and install community-built tools and workflows.
+- **Persistent procedural memory** — Samuel remembers how he completed a workflow and reuses the approach next time. *(shipped)*
+- **General monitoring mode** — "watch this meeting and flag anything important" as a first-class feature.
+- **Local-first mode** — local Whisper + Ollama option, no API key required.
+- **Cross-platform** — Windows and Linux ports.
+- **iOS / Android companion app** — pick up where you left off on the desktop.
+- **SRS scheduling** — spaced repetition on your saved scene flashcards.
+- **OS-level sandboxing for dynamic plugins.**
+- **Local on-device wake word** — zero API cost for "Hey Samuel."
+- **Anki export.**
+
+If any of these excite you, [open an issue](https://github.com/sambuild04/reading-ai-agent/issues/new) saying which one — we'll find a way to collaborate.
 
 ---
 
@@ -332,14 +385,103 @@ Currently macOS only. Windows and Linux are on the roadmap.
 **What does "self-modifying" mean?**
 You can ask the agent to add a new capability ("add a weather tool") and it generates the code, asks for your approval, and hot-loads it into the running session. No rebuild required.
 
+**What is procedural memory?**
+When Samuel successfully completes a multi-step workflow (like fixing lyrics by searching the web, comparing, and correcting), he saves the steps as a reusable "skill" in `~/.samuel/skills/`. Next time you ask for something similar, he loads the skill and follows the proven steps instead of improvising.
+
 **Is my data private?**
-Screen captures and audio are sent to OpenAI's APIs for processing. Memory, preferences, and secrets are stored locally in `~/.samuel/`. Nothing is sent to third-party servers besides OpenAI.
+Screen captures and audio are sent to OpenAI's APIs for processing. Memory, preferences, skills, and secrets are stored locally in `~/.samuel/`. Nothing is sent to third-party servers besides OpenAI.
+
+---
+
+## Used by
+
+Using Samuel for something interesting? [Open a PR](https://github.com/sambuild04/reading-ai-agent/pulls) adding yourself.
+
+*(Be the first.)*
 
 ---
 
 ## Contributing
 
-Issues and PRs welcome — especially for plugin ideas, new tool capabilities, and cross-platform support.
+Samuel is a one-person project growing into something bigger. Every contribution — code, skills, ideas, bug reports, even a thoughtful issue comment — genuinely shapes where this goes next.
+
+### What we need help with right now
+
+- **Windows + Linux ports** — Samuel is macOS-only because of ScreenCaptureKit and Peekaboo. We need someone who knows Windows audio capture (WASAPI) or Linux equivalents (PipeWire/PulseAudio) to port the system-audio listener.
+- **One-click installer** — packaging Samuel as a signed `.dmg` so users don't need Rust + npm + Swift to try it. Tauri experience welcome.
+- **MCP integration** — wiring up `@openai/agents` with MCP server support so Samuel can talk to Notion, Gmail, Slack, etc. Currently the highest-leverage feature on the roadmap.
+- **Skill / plugin contributions** — write a workflow you'd actually use (see below).
+- **Tool description tuning** — the better the descriptions, the more reliably Samuel picks the right tool. PRs welcome.
+- **Documentation** — walk through the install on your machine and tell us where you got stuck. The "what tripped me up" issues are surprisingly valuable.
+- **Translations** — currently English-only. Native speakers of any language welcome to translate UI strings and prompt examples.
+
+### Contribute a skill (no coding required)
+
+Samuel learns by doing — but you can teach him faster by writing skills. A skill is a markdown file describing a useful workflow. Examples we'd love:
+
+- "Generate lyrics from a YouTube video, verify against multiple sources, let me pick"
+- "Summarize my recorded meeting and email me the action items"
+- "Watch my coding session and remind me when I've been stuck on the same error for 10 minutes"
+- "Daily standup: ask me what I'm doing today and save it as a Notion entry"
+- Any 3+ step workflow you do at your computer
+
+Submit a markdown file via PR to `skills/community/`. Featured skills get highlighted in releases.
+
+### Good first issues
+
+New to the codebase? These are scoped for someone unfamiliar with the project:
+
+- [Issues labeled `good first issue`](https://github.com/sambuild04/reading-ai-agent/labels/good%20first%20issue)
+
+If none look right, [open an issue](https://github.com/sambuild04/reading-ai-agent/issues/new) describing what you'd like to work on and we'll help you scope it.
+
+### How to help, by time available
+
+| Time | What you can do |
+|---|---|
+| **5 minutes** | Star the repo. Tweet about it. Tell one friend who'd find it useful. |
+| **30 minutes** | Try Samuel and report a bug. Suggest a feature. Comment on an issue. |
+| **2 hours** | Write a skill. Improve a tool description. Translate UI strings. |
+| **A weekend** | Pick a `good first issue`. Build an MCP integration. Write a doc walkthrough. |
+| **Bigger** | Co-own a workstream — Windows port, MCP integration, skill marketplace. DM me. |
+
+### What you get
+
+- Your name in the README, release notes, and the Contributors section.
+- Your skill featured in the official library, used by every Samuel user.
+- Direct collaboration with the founder — this is a one-person project; you'll talk to me directly.
+- Early access to new features and a real say in what gets built next.
+- A real, shippable open-source contribution for your portfolio.
+
+### Setup for contributors
+
+```bash
+git clone https://github.com/sambuild04/reading-ai-agent.git
+cd reading-ai-agent
+npm install
+swiftc -o src-tauri/helpers/record-audio src-tauri/helpers/record-audio.swift \
+  -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia
+echo '{"apiKey": "sk-..."}' > ~/.samuel/config.json
+npm run tauri:dev
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, code style, and PR process.
+
+### Community
+
+- [Issues](https://github.com/sambuild04/reading-ai-agent/issues) — bug reports and feature requests
+- [Discussions](https://github.com/sambuild04/reading-ai-agent/discussions) — ideas, questions, show-and-tell
+- [Sam on X](https://x.com/sambuild04) — follow for updates
+
+### Contributors
+
+Thanks to everyone who's helped:
+
+[![Contributors](https://contrib.rocks/image?repo=sambuild04/reading-ai-agent)](https://github.com/sambuild04/reading-ai-agent/graphs/contributors)
+
+Includes code, skills, docs, design, ideas, and bug reports.
+
+---
 
 ## License
 
@@ -347,4 +489,8 @@ MIT
 
 ---
 
-**Built by [Sam Feng](https://github.com/sambuild04)**
+## Why I'm building this
+
+I wanted an AI that lives where I actually work — not a chatbot in another tab. Something that sees my screen, hears what I hear, learns what I'm trying to do, and gets better at helping me over time. After a year of building, here it is. It's still early. If any of this resonates, I'd love your help making it real.
+
+— [Sam Feng](https://github.com/sambuild04) · [DM me on X](https://x.com/sambuild04)
