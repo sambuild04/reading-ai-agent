@@ -10,8 +10,8 @@ Internally, the agent answers to **"Hey Samuel."**
 ![macOS](https://img.shields.io/badge/platform-macOS-black.svg)
 ![Tauri v2](https://img.shields.io/badge/Tauri-v2-orange.svg)
 ![OpenAI Realtime API](https://img.shields.io/badge/OpenAI-Realtime%20Voice-412991.svg)
-[![Discord](https://img.shields.io/badge/Discord-join-5865F2.svg)](https://github.com/sambuild04/reading-ai-agent/issues/new?title=Discord+invite+request)
-[![Contributors](https://img.shields.io/github/contributors/sambuild04/reading-ai-agent.svg)](https://github.com/sambuild04/reading-ai-agent/graphs/contributors)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2.svg)](https://github.com/sambuild04/screen-voice-agent/issues/new?title=Discord+invite+request)
+[![Contributors](https://img.shields.io/github/contributors/sambuild04/screen-voice-agent.svg)](https://github.com/sambuild04/screen-voice-agent/graphs/contributors)
 
 > **TL;DR:** Say "Hey Samuel" and talk. He sees your screen, hears your audio, remembers everything, and writes his own tools when he needs new capabilities.
 
@@ -274,7 +274,7 @@ All tools use structured error responses with fallback chains. Related tools are
 
 ## Quick Start
 
-> **Heads up:** A one-click installer is on the way. For now, install requires building from source. If you want to be notified when the packaged release ships, star this repo or [open an issue](https://github.com/sambuild04/reading-ai-agent/issues/new?title=Notify+me+when+installer+is+ready) saying "notify me."
+> **Heads up:** A one-click installer is on the way. For now, install requires building from source. If you want to be notified when the packaged release ships, star this repo or [open an issue](https://github.com/sambuild04/screen-voice-agent/issues/new?title=Notify+me+when+installer+is+ready) saying "notify me."
 
 ### Prerequisites
 
@@ -287,8 +287,8 @@ All tools use structured error responses with fallback chains. Related tools are
 
 ```bash
 brew install steipete/tap/peekaboo yt-dlp
-git clone https://github.com/sambuild04/reading-ai-agent.git
-cd reading-ai-agent
+git clone https://github.com/sambuild04/screen-voice-agent.git
+cd screen-voice-agent
 npm install
 swiftc -o src-tauri/helpers/record-audio src-tauri/helpers/record-audio.swift \
   -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia
@@ -303,7 +303,7 @@ npm run tauri:dev
 
 Say **"Hey Samuel"** and start talking.
 
-> Stuck on install? [Open an issue](https://github.com/sambuild04/reading-ai-agent/issues/new) or join the [Discord](https://github.com/sambuild04/reading-ai-agent/issues/new?title=Discord+invite+request) — we'll help you through it and improve the docs.
+> Stuck on install? [Open an issue](https://github.com/sambuild04/screen-voice-agent/issues/new) or join the [Discord](https://github.com/sambuild04/screen-voice-agent/issues/new?title=Discord+invite+request) — we'll help you through it and improve the docs.
 
 ---
 
@@ -346,7 +346,7 @@ The vision: an AI that lives where you work, sees what you see, hears what you h
 - **Local on-device wake word** — zero API cost for "Hey Samuel."
 - **Anki export.**
 
-If any of these excite you, [open an issue](https://github.com/sambuild04/reading-ai-agent/issues/new) saying which one — we'll find a way to collaborate.
+If any of these excite you, [open an issue](https://github.com/sambuild04/screen-voice-agent/issues/new) saying which one — we'll find a way to collaborate.
 
 ---
 
@@ -395,7 +395,7 @@ Screen captures and audio are sent to OpenAI's APIs for processing. Memory, pref
 
 ## Used by
 
-Using Samuel for something interesting? [Open a PR](https://github.com/sambuild04/reading-ai-agent/pulls) adding yourself.
+Using Samuel for something interesting? [Open a PR](https://github.com/sambuild04/screen-voice-agent/pulls) adding yourself.
 
 *(Be the first.)*
 
@@ -431,9 +431,9 @@ Submit a markdown file via PR to `skills/community/`. Featured skills get highli
 
 New to the codebase? These are scoped for someone unfamiliar with the project:
 
-- [Issues labeled `good first issue`](https://github.com/sambuild04/reading-ai-agent/labels/good%20first%20issue)
+- [Issues labeled `good first issue`](https://github.com/sambuild04/screen-voice-agent/labels/good%20first%20issue)
 
-If none look right, [open an issue](https://github.com/sambuild04/reading-ai-agent/issues/new) describing what you'd like to work on and we'll help you scope it.
+If none look right, [open an issue](https://github.com/sambuild04/screen-voice-agent/issues/new) describing what you'd like to work on and we'll help you scope it.
 
 ### How to help, by time available
 
@@ -456,8 +456,8 @@ If none look right, [open an issue](https://github.com/sambuild04/reading-ai-age
 ### Setup for contributors
 
 ```bash
-git clone https://github.com/sambuild04/reading-ai-agent.git
-cd reading-ai-agent
+git clone https://github.com/sambuild04/screen-voice-agent.git
+cd screen-voice-agent
 npm install
 swiftc -o src-tauri/helpers/record-audio src-tauri/helpers/record-audio.swift \
   -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia
@@ -469,15 +469,15 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, code style, and
 
 ### Community
 
-- [Issues](https://github.com/sambuild04/reading-ai-agent/issues) — bug reports and feature requests
-- [Discussions](https://github.com/sambuild04/reading-ai-agent/discussions) — ideas, questions, show-and-tell
+- [Issues](https://github.com/sambuild04/screen-voice-agent/issues) — bug reports and feature requests
+- [Discussions](https://github.com/sambuild04/screen-voice-agent/discussions) — ideas, questions, show-and-tell
 - [Sam on X](https://x.com/sambuild04) — follow for updates
 
 ### Contributors
 
 Thanks to everyone who's helped:
 
-[![Contributors](https://contrib.rocks/image?repo=sambuild04/reading-ai-agent)](https://github.com/sambuild04/reading-ai-agent/graphs/contributors)
+[![Contributors](https://contrib.rocks/image?repo=sambuild04/screen-voice-agent)](https://github.com/sambuild04/screen-voice-agent/graphs/contributors)
 
 Includes code, skills, docs, design, ideas, and bug reports.
 
