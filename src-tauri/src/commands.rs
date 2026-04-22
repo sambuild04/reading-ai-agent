@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::memory;
+use crate::teach::extract_html_tag;
 
 /// Safe UTF-8 truncation — never slices in the middle of a multi-byte character.
 fn truncate_str(s: &str, max_bytes: usize) -> &str {
@@ -2188,6 +2189,11 @@ pub async fn fetch_genius_lyrics(track: String, artist: String) -> Result<String
 }
 
 fn urlencoding(s: &str) -> String {
+    urlencoding_str(s)
+}
+
+/// Percent-encode a string for use in URLs (handles full UTF-8).
+pub fn urlencoding_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
         match b {
@@ -2305,4 +2311,192 @@ fn strip_html_to_text(html: &str) -> String {
         .replace("&apos;", "'")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
+}
+
+// ── File System Commands ────────────────────────────────────────
+
+/// Resolve `~` to the user's home directory and ensure parent dirs exist for writes.
+fn resolve_path(raw: &str) -> Result<std::path::PathBuf, String> {
+    let expanded = if raw.starts_with("~/") {
+        let home = dirs::home_dir().ok_or("Cannot find home directory")?;
+        home.join(&raw[2..])
+    } else {
+        std::path::PathBuf::from(raw)
+    };
+    Ok(expanded)
+}
+
+/// Default output directory for files Samuel creates.
+fn samuel_docs_dir() -> Result<std::path::PathBuf, String> {
+    let home = dirs::home_dir().ok_or("Cannot find home directory")?;
+    let dir = home.join("Documents").join("Samuel");
+    if !dir.exists() {
+        fs::create_dir_all(&dir).map_err(|e| format!("Create ~/Documents/Samuel: {e}"))?;
+    }
+    Ok(dir)
+}
+
+#[tauri::command]
+pub async fn agent_write_file(path: String, content: String) -> Result<String, String> {
+    let target = if path.is_empty() || path == "auto" {
+        let dir = samuel_docs_dir()?;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        dir.join(format!("note-{ts}.md"))
+    } else {
+        resolve_path(&path)?
+    };
+
+    if let Some(parent) = target.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Create directory {}: {e}", parent.display()))?;
+        }
+    }
+
+    fs::write(&target, &content)
+        .map_err(|e| format!("Write {}: {e}", target.display()))?;
+
+    let size = content.len();
+    eprintln!("[fs] wrote {} bytes to {}", size, target.display());
+    Ok(format!("Saved to {} ({} bytes)", target.display(), size))
+}
+
+#[tauri::command]
+pub async fn agent_read_file(path: String) -> Result<String, String> {
+    let target = resolve_path(&path)?;
+    if !target.exists() {
+        return Err(format!("File not found: {}", target.display()));
+    }
+
+    let meta = fs::metadata(&target)
+        .map_err(|e| format!("Stat {}: {e}", target.display()))?;
+    if meta.len() > 512_000 {
+        return Err(format!(
+            "File too large ({} KB). Maximum is 500 KB for reading.",
+            meta.len() / 1024
+        ));
+    }
+
+    let content = fs::read_to_string(&target)
+        .map_err(|e| format!("Read {}: {e}", target.display()))?;
+    eprintln!("[fs] read {} bytes from {}", content.len(), target.display());
+    Ok(content)
+}
+
+#[tauri::command]
+pub async fn agent_list_directory(path: String) -> Result<Vec<String>, String> {
+    let target = if path.is_empty() {
+        samuel_docs_dir()?
+    } else {
+        resolve_path(&path)?
+    };
+
+    if !target.exists() {
+        return Err(format!("Directory not found: {}", target.display()));
+    }
+    if !target.is_dir() {
+        return Err(format!("Not a directory: {}", target.display()));
+    }
+
+    let mut entries: Vec<String> = Vec::new();
+    for entry in fs::read_dir(&target).map_err(|e| format!("List {}: {e}", target.display()))? {
+        if let Ok(e) = entry {
+            let name = e.file_name().to_string_lossy().to_string();
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            entries.push(if is_dir { format!("{name}/") } else { name });
+        }
+    }
+    entries.sort();
+    eprintln!("[fs] listed {} entries in {}", entries.len(), target.display());
+    Ok(entries)
+}
+
+// ---------------------------------------------------------------------------
+// Skills (procedural memory)
+// ---------------------------------------------------------------------------
+
+fn skills_dir() -> Result<std::path::PathBuf, String> {
+    let home = dirs::home_dir().ok_or("Cannot find home directory")?;
+    let dir = home.join(".samuel").join("skills");
+    if !dir.exists() {
+        fs::create_dir_all(&dir).map_err(|e| format!("Create ~/.samuel/skills: {e}"))?;
+    }
+    Ok(dir)
+}
+
+/// Parse YAML-ish frontmatter between `---` lines.
+fn parse_frontmatter(content: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let mut lines = content.lines();
+    if lines.next().map(|l| l.trim()) != Some("---") {
+        return map;
+    }
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            break;
+        }
+        if let Some((key, value)) = trimmed.split_once(':') {
+            let k = key.trim().to_string();
+            let v = value.trim().trim_matches('"').to_string();
+            map.insert(k, v);
+        }
+    }
+    map
+}
+
+#[derive(serde::Serialize)]
+pub struct SkillSummary {
+    pub id: String,
+    pub title: String,
+    pub trigger: String,
+    pub summary: String,
+}
+
+#[tauri::command]
+pub async fn skill_list_summaries() -> Result<Vec<SkillSummary>, String> {
+    let dir = skills_dir()?;
+    let mut results: Vec<SkillSummary> = Vec::new();
+    let entries = fs::read_dir(&dir).map_err(|e| format!("Read skills dir: {e}"))?;
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("md") {
+            continue;
+        }
+        let id = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let fm = parse_frontmatter(&content);
+        results.push(SkillSummary {
+            id,
+            title: fm.get("title").cloned().unwrap_or_default(),
+            trigger: fm.get("trigger").cloned().unwrap_or_default(),
+            summary: fm.get("summary").cloned().unwrap_or_default(),
+        });
+    }
+    results.sort_by(|a, b| a.id.cmp(&b.id));
+    eprintln!("[skills] listed {} skills", results.len());
+    Ok(results)
+}
+
+#[tauri::command]
+pub async fn skill_delete(id: String) -> Result<String, String> {
+    let safe = id.replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "-");
+    let dir = skills_dir()?;
+    let path = dir.join(format!("{safe}.md"));
+    if !path.exists() {
+        return Err(format!("Skill not found: {safe}"));
+    }
+    fs::remove_file(&path).map_err(|e| format!("Delete skill {safe}: {e}"))?;
+    eprintln!("[skills] deleted {safe}");
+    Ok(format!("Deleted skill: {safe}"))
 }

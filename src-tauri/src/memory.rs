@@ -316,6 +316,18 @@ pub fn get_recent_corrections() -> Vec<String> {
 }
 
 #[tauri::command]
+pub async fn memory_clear() -> Result<(), String> {
+    let path = memory_path()?;
+    if path.exists() {
+        fs::remove_file(&path).map_err(|e| format!("Failed to delete memory: {e}"))?;
+    }
+    let mut lock = MEMORY.lock().unwrap();
+    *lock = Some(SamuelMemory::default());
+    eprintln!("[memory] cleared all data");
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn memory_get_context() -> Result<String, String> {
     Ok(get_context())
 }

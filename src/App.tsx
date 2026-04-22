@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalSize } from "@tauri-apps/api/dpi";
 import { useRealtime } from "./hooks/useRealtime";
 import { useWakeWord } from "./hooks/useWakeWord";
 import { useRecordMode } from "./hooks/useRecordMode";
@@ -18,9 +20,9 @@ import { TeachViewer } from "./components/TeachViewer";
 import { PluginApproval } from "./components/PluginApproval";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { LyricsViewer } from "./components/LyricsViewer";
-import { sendTextAndRespond, registerTeachContent, registerUIUpdate, registerDismissCard, registerSongPlayback, registerShowWordCard, registerSetCardMode, registerToggleLyrics, registerSetLyricsContent } from "./lib/session-bridge";
+import { sendTextAndRespond, registerTeachContent, registerUIUpdate, registerDismissCard, registerSongPlayback, registerShowWordCard, registerSetCardMode, registerToggleLyrics, registerSetLyricsContent, registerUpdateSongLines, registerGetSongMeta } from "./lib/session-bridge";
 import type { WordCardData } from "./lib/session-bridge";
-import { registerPrivacyPrefsGetter } from "./lib/samuel";
+import { registerPrivacyPrefsGetter, registerUIStateGetter } from "./lib/samuel";
 
 export default function App() {
   const {
@@ -39,13 +41,22 @@ export default function App() {
 
   const record = useRecordMode();
   const ui = useUIPreferences();
-  const learning = useLearningMode(status, ui.prefs.vocab_card_interval, agentState, ui.prefs.vocab_card_mode, ui.prefs.screen_watch_enabled, ui.prefs.audio_listen_enabled);
+  const learning = useLearningMode(
+    status,
+    ui.prefs["word_card.interval"] as number,
+    agentState,
+    ui.prefs["word_card.mode"] as string,
+    ui.prefs["privacy.screen_watch"] as boolean,
+    ui.prefs["privacy.audio_listen"] as boolean,
+  );
   const teachMode = useTeachMode();
 
   // Latch song data so it survives teachMode.close() (which nulls content)
   const [songAudioPath, setSongAudioPath] = useState<string | null>(null);
   const [songLines, setSongLines] = useState<import("./hooks/useTeachMode").ContentLine[] | null>(null);
   const [songTitle, setSongTitle] = useState<string | null>(null);
+  const [songSource, setSongSource] = useState<string | null>(null);
+  const [songVideoId, setSongVideoId] = useState<string | null>(null);
   const isSongContent = !!teachMode.content?.videoId;
 
   useEffect(() => {
@@ -55,6 +66,8 @@ export default function App() {
     if (teachMode.content?.videoId && teachMode.content.lines.length > 0) {
       setSongLines(teachMode.content.lines);
       setSongTitle(teachMode.content.title ?? null);
+      setSongVideoId(teachMode.content.videoId ?? null);
+      setSongSource(teachMode.content.lyrics_source ?? "unknown");
     }
   }, [teachMode.content]);
 
@@ -70,19 +83,26 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [lyricsViewOpen, setLyricsViewOpen] = useState(false);
 
-  const handlePrivacyToggle = useCallback((key: "screen_watch_enabled" | "audio_listen_enabled" | "local_time_enabled" | "location_enabled") => {
+  const handlePrivacyToggle = useCallback((key: "privacy.screen_watch" | "privacy.audio_listen" | "privacy.local_time" | "privacy.location") => {
     const current = ui.prefs[key];
-    ui.applyUpdate({ component: "privacy", property: key, value: current ? "false" : "true" });
+    const prop = key.split(".")[1];
+    ui.applyUpdate({ component: "privacy", property: prop, value: current ? "false" : "true" });
   }, [ui.prefs, ui.applyUpdate]);
 
   // Expose privacy prefs to Samuel's tools so they can check at call time
   useEffect(() => {
     registerPrivacyPrefsGetter(() => ({
-      local_time_enabled: ui.prefs.local_time_enabled,
-      location_enabled: ui.prefs.location_enabled,
+      local_time_enabled: ui.prefs["privacy.local_time"] as boolean,
+      location_enabled: ui.prefs["privacy.location"] as boolean,
     }));
     return () => registerPrivacyPrefsGetter(null);
-  }, [ui.prefs.local_time_enabled, ui.prefs.location_enabled]);
+  }, [ui.prefs["privacy.local_time"], ui.prefs["privacy.location"]]);
+
+  // Expose full UI state so query_ui_state tool can read current values
+  useEffect(() => {
+    registerUIStateGetter(() => ui.prefs);
+    return () => registerUIStateGetter(null);
+  }, [ui.prefs]);
 
   // Register teach content bridge so Samuel's voice tool can trigger teach mode
   useEffect(() => {
@@ -136,6 +156,23 @@ export default function App() {
       registerSetLyricsContent(null);
     };
   }, []);
+
+  // Register song lines hot-swap + metadata bridges for lyrics correction tools
+  useEffect(() => {
+    registerUpdateSongLines((lines) => {
+      setSongLines(lines);
+    });
+    registerGetSongMeta(() => ({
+      title: songTitle,
+      source: songSource,
+      videoId: songVideoId,
+      lines: songLines ?? [],
+    }));
+    return () => {
+      registerUpdateSongLines(null);
+      registerGetSongMeta(null);
+    };
+  }, [songTitle, songSource, songVideoId]);
 
   // Register song playback bridge — mute mic during playback, unmute when done.
   // Returns a promise so Samuel's tool waits until the segment finishes before speaking.
@@ -272,8 +309,28 @@ export default function App() {
     disconnect();
   }, [disconnect, setWakeWordMode, extractFeedback]);
 
+  // Auto-resize window height to fit content
+  const containerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const win = getCurrentWindow();
+    const MIN_H = 400;
+    const MAX_H = 900;
+    let lastH = 0;
+    const observer = new ResizeObserver(() => {
+      const needed = Math.min(MAX_H, Math.max(MIN_H, el.scrollHeight + 20));
+      if (Math.abs(needed - lastH) > 10) {
+        lastH = needed;
+        win.setSize(new LogicalSize(520, needed));
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   return (
-    <div className="flex h-screen flex-col" style={ui.cssVars as React.CSSProperties}>
+    <div ref={containerRef} className="flex h-screen flex-col" style={ui.cssVars as React.CSSProperties}>
       {/* Compact header — draggable region for borderless window */}
       <div data-tauri-drag-region className="flex items-center justify-between px-5 py-2">
         <StatusBar
@@ -412,6 +469,7 @@ export default function App() {
         visible={settingsOpen}
         prefs={ui.prefs}
         onToggle={handlePrivacyToggle}
+        onResetPrefs={ui.resetAll}
         onClose={() => setSettingsOpen(false)}
       />
     </div>

@@ -2,88 +2,324 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 const STORAGE_KEY = "samuel-ui-prefs";
 
-export type VocabCardMode = "manual" | "auto";
+// ── Schema-driven UI preferences ──────────────────────────────────────────
+// Every voice-adjustable property is declared once here. The schema drives
+// state shape, CSS vars, the update_ui tool, and the query_ui_state tool.
 
-export interface UIPreferences {
-  samuel_size: number;        // px, default 320
-  samuel_opacity: number;     // 0-1, default 1
-  bubble_font_size: number;   // px, default 15
-  vocab_card_visible: boolean;
-  vocab_card_position: "left" | "right";
-  vocab_card_interval: number; // seconds between cards, default 45
-  vocab_card_mode: VocabCardMode; // manual = only on request, auto = ambient cards
-  romaji_visible: boolean;
-  reading_visible: boolean;   // furigana/pinyin
-  teach_font_size: number;    // px, default 14
-  screen_watch_enabled: boolean;
-  audio_listen_enabled: boolean;
-  local_time_enabled: boolean;
-  location_enabled: boolean;
+type PropType = "number" | "boolean" | "enum";
+
+interface PropSchema {
+  type: PropType;
+  default: number | boolean | string;
+  aliases: string[];  // alternate component.property names that map here
+  // number-specific
+  min?: number;
+  max?: number;
+  step?: number;      // relative adjustment step
+  unit?: string;      // for CSS var output (e.g. "px", "")
+  cssVar?: string;    // CSS custom property name, omit if no CSS var needed
+  // enum-specific
+  options?: string[];
 }
 
-const DEFAULTS: UIPreferences = {
-  samuel_size: 320,
-  samuel_opacity: 1,
-  bubble_font_size: 15,
-  vocab_card_visible: true,
-  vocab_card_position: "right",
-  vocab_card_interval: 45,
-  vocab_card_mode: "manual",
-  romaji_visible: true,
-  reading_visible: true,
-  teach_font_size: 14,
-  screen_watch_enabled: true,
-  audio_listen_enabled: true,
-  local_time_enabled: true,
-  location_enabled: false,
+const SCHEMA: Record<string, PropSchema> = {
+  // ── Avatar ──
+  "avatar.size": {
+    type: "number", default: 320, min: 80, max: 800, step: 40, unit: "px",
+    cssVar: "--samuel-size",
+    aliases: ["samuel.size", "character.size", "agent.size", "self.size", "me.size",
+              "avatar.font_size", "samuel.font_size"],
+  },
+  "avatar.opacity": {
+    type: "number", default: 1, min: 0.1, max: 1, step: 0.15, unit: "",
+    cssVar: "--samuel-opacity",
+    aliases: ["samuel.opacity", "character.opacity", "agent.opacity"],
+  },
+
+  // ── Speech bubble ──
+  "bubble.font_size": {
+    type: "number", default: 15, min: 10, max: 32, step: 2, unit: "px",
+    cssVar: "--bubble-font-size",
+    aliases: ["speech_bubble.font_size", "speech_bubble.size", "bubble.size",
+              "text.font_size", "text.size"],
+  },
+  "bubble.opacity": {
+    type: "number", default: 1, min: 0.1, max: 1, step: 0.15, unit: "",
+    cssVar: "--bubble-opacity",
+    aliases: ["speech_bubble.opacity", "text.opacity"],
+  },
+  "bubble.max_width": {
+    type: "number", default: 280, min: 150, max: 500, step: 40, unit: "px",
+    cssVar: "--bubble-max-width",
+    aliases: ["speech_bubble.max_width", "speech_bubble.width", "bubble.width"],
+  },
+
+  // ── Word/vocab card ──
+  "word_card.visible": {
+    type: "boolean", default: true,
+    aliases: ["vocab_card.visible", "card.visible"],
+  },
+  "word_card.position": {
+    type: "enum", default: "right", options: ["left", "right"],
+    aliases: ["vocab_card.position", "card.position"],
+  },
+  "word_card.mode": {
+    type: "enum", default: "manual", options: ["manual", "auto"],
+    aliases: ["vocab_card.mode", "card.mode"],
+  },
+  "word_card.interval": {
+    type: "number", default: 45, min: 10, max: 600, step: 30, unit: "s",
+    aliases: ["vocab_card.interval", "vocab_card.frequency", "card.frequency",
+              "card.interval", "word_card.frequency"],
+  },
+  "word_card.font_size": {
+    type: "number", default: 13, min: 10, max: 24, step: 2, unit: "px",
+    cssVar: "--word-card-font-size",
+    aliases: ["vocab_card.font_size", "vocab_card.size", "card.font_size", "card.size",
+              "word_card.size"],
+  },
+
+  // ── Annotations ──
+  "romaji.visible": {
+    type: "boolean", default: true,
+    aliases: [],
+  },
+  "reading.visible": {
+    type: "boolean", default: true,
+    aliases: ["furigana.visible", "pinyin.visible"],
+  },
+
+  // ── Teach viewer (annotated content panel) ──
+  "teach.font_size": {
+    type: "number", default: 14, min: 10, max: 28, step: 2, unit: "px",
+    cssVar: "--teach-font-size",
+    aliases: ["teach_viewer.font_size", "teach_viewer.size", "teach.size",
+              "subtitle_bar.font_size", "subtitle_bar.size"],
+  },
+  "teach.opacity": {
+    type: "number", default: 0.95, min: 0.3, max: 1, step: 0.1, unit: "",
+    cssVar: "--teach-opacity",
+    aliases: ["teach_viewer.opacity"],
+  },
+
+  // ── Lyrics HUD panel ──
+  "lyrics.width": {
+    type: "number", default: 185, min: 120, max: 500, step: 40, unit: "px",
+    cssVar: "--lyrics-width",
+    aliases: ["lyrics_panel.width"],
+  },
+  "lyrics.font_size": {
+    type: "number", default: 12, min: 9, max: 22, step: 2, unit: "px",
+    cssVar: "--lyrics-font-size",
+    aliases: ["lyrics_panel.font_size", "lyrics_panel.size", "lyrics.size"],
+  },
+  "lyrics.opacity": {
+    type: "number", default: 0.55, min: 0.2, max: 1, step: 0.1, unit: "",
+    cssVar: "--lyrics-opacity",
+    aliases: ["lyrics_panel.opacity"],
+  },
+  "lyrics.left": {
+    type: "number", default: 8, min: 0, max: 800, step: 20, unit: "px",
+    cssVar: "--lyrics-left",
+    aliases: ["lyrics_panel.left", "lyrics.position", "lyrics_panel.position", "lyrics.x"],
+  },
+  "lyrics.top": {
+    type: "number", default: 40, min: 0, max: 600, step: 20, unit: "px",
+    cssVar: "--lyrics-top",
+    aliases: ["lyrics_panel.top", "lyrics.y"],
+  },
+
+  // ── Transcript / chat area ──
+  "transcript.font_size": {
+    type: "number", default: 14, min: 10, max: 24, step: 2, unit: "px",
+    cssVar: "--transcript-font-size",
+    aliases: ["chat.font_size", "chat.size", "transcript.size"],
+  },
+
+  // ── Global app ──
+  "app.background_opacity": {
+    type: "number", default: 0.85, min: 0.2, max: 1, step: 0.1, unit: "",
+    cssVar: "--app-bg-opacity",
+    aliases: ["background.opacity", "window.opacity"],
+  },
+  "app.accent_color": {
+    type: "enum", default: "indigo",
+    options: ["indigo", "cyan", "violet", "emerald", "rose", "amber", "slate"],
+    cssVar: "--accent-hue",
+    aliases: ["theme.accent", "theme.color", "app.theme", "app.color"],
+  },
+  "app.border_radius": {
+    type: "number", default: 14, min: 0, max: 30, step: 4, unit: "px",
+    cssVar: "--app-radius",
+    aliases: ["theme.roundness", "app.roundness"],
+  },
+
+  // ── Privacy (non-visual but voice-toggleable) ──
+  "privacy.screen_watch": {
+    type: "boolean", default: false,
+    aliases: ["privacy.screen_watch_enabled", "privacy.screen"],
+  },
+  "privacy.audio_listen": {
+    type: "boolean", default: false,
+    aliases: ["privacy.audio_listen_enabled", "privacy.audio", "privacy.microphone"],
+  },
+  "privacy.local_time": {
+    type: "boolean", default: false,
+    aliases: ["privacy.local_time_enabled", "privacy.time"],
+  },
+  "privacy.location": {
+    type: "boolean", default: false,
+    aliases: ["privacy.location_enabled"],
+  },
 };
+
+// Build reverse lookup: alias → canonical key
+const ALIAS_MAP = new Map<string, string>();
+for (const [canonical, schema] of Object.entries(SCHEMA)) {
+  ALIAS_MAP.set(canonical, canonical);
+  for (const alias of schema.aliases) {
+    ALIAS_MAP.set(alias, canonical);
+  }
+}
+
+// ── State type derived from schema ──
+export type UIPreferences = Record<string, number | boolean | string>;
+
+function buildDefaults(): UIPreferences {
+  const d: UIPreferences = {};
+  for (const [key, s] of Object.entries(SCHEMA)) {
+    d[key] = s.default;
+  }
+  return d;
+}
+
+const DEFAULTS = buildDefaults();
 
 function loadPrefs(): UIPreferences {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return { ...DEFAULTS, ...JSON.parse(raw) };
+    if (raw) {
+      const saved = JSON.parse(raw);
+      // Migrate legacy keys
+      const migrated = migratePrefs(saved);
+      return { ...DEFAULTS, ...migrated };
+    }
   } catch {}
   return { ...DEFAULTS };
+}
+
+function migratePrefs(saved: Record<string, unknown>): UIPreferences {
+  const result: UIPreferences = {};
+  const LEGACY_MAP: Record<string, string> = {
+    samuel_size: "avatar.size",
+    samuel_opacity: "avatar.opacity",
+    bubble_font_size: "bubble.font_size",
+    vocab_card_visible: "word_card.visible",
+    vocab_card_position: "word_card.position",
+    vocab_card_interval: "word_card.interval",
+    vocab_card_mode: "word_card.mode",
+    romaji_visible: "romaji.visible",
+    reading_visible: "reading.visible",
+    teach_font_size: "teach.font_size",
+    lyrics_width: "lyrics.width",
+    screen_watch_enabled: "privacy.screen_watch",
+    audio_listen_enabled: "privacy.audio_listen",
+    local_time_enabled: "privacy.local_time",
+    location_enabled: "privacy.location",
+  };
+  for (const [k, v] of Object.entries(saved)) {
+    const newKey = LEGACY_MAP[k] ?? k;
+    if (newKey in SCHEMA) {
+      result[newKey] = v as number | boolean | string;
+    }
+  }
+  return result;
 }
 
 function savePrefs(prefs: UIPreferences) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
 }
 
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
+}
+
 // Maps natural language relative values to numeric deltas
-function resolveValue(
-  current: number,
-  value: string,
-  step: number,
-): number {
+function resolveNumeric(current: number, value: string, step: number): number {
   const lower = value.toLowerCase().trim();
+  const mag = (lower.includes("much") || lower.includes("a lot")) ? 3
+    : (lower.includes("little") || lower.includes("bit") || lower.includes("slight")) ? 0.5
+    : 1;
 
-  // Increase
-  if (lower.includes("larger") || lower.includes("bigger") || lower.includes("increase") || lower.includes("expand") || lower === "more" || lower === "up") {
-    const magnitude = (lower.includes("much") || lower.includes("a lot")) ? 3
-      : (lower.includes("little") || lower.includes("bit") || lower.includes("slight")) ? 0.5
-      : 1;
-    return current + Math.ceil(step * magnitude);
+  // Increase: larger, bigger, wider, right, down (positional), further, more
+  if (
+    lower.includes("larger") || lower.includes("bigger") || lower.includes("increase") ||
+    lower.includes("expand") || lower.includes("wider") || lower.includes("taller") ||
+    lower.includes("brighter") || lower.includes("more visible") ||
+    lower.includes("right") || lower.includes("further") ||
+    lower === "more" || lower === "up"
+  ) {
+    return current + Math.ceil(step * mag);
   }
 
-  // Decrease
-  if (lower.includes("smaller") || lower.includes("less") || lower.includes("reduce") || lower.includes("shrink") || lower.includes("decrease") || lower.includes("tiny") || lower === "down") {
-    const magnitude = (lower.includes("much") || lower.includes("a lot") || lower.includes("tiny") || lower.includes("smallest") || lower.includes("minimum")) ? 3
-      : (lower.includes("little") || lower.includes("bit") || lower.includes("slight")) ? 0.5
-      : 1;
-    return current - Math.ceil(step * magnitude);
+  // Decrease: smaller, narrower, left (positional), closer, less
+  if (
+    lower.includes("smaller") || lower.includes("less") || lower.includes("reduce") ||
+    lower.includes("shrink") || lower.includes("decrease") || lower.includes("narrower") ||
+    lower.includes("shorter") || lower.includes("dimmer") || lower.includes("less visible") ||
+    lower.includes("left") || lower.includes("closer") ||
+    lower.includes("tiny") || lower === "down"
+  ) {
+    return current - Math.ceil(step * mag);
   }
 
-  // Reset
-  if (lower === "default" || lower === "reset" || lower === "original")
-    return NaN; // caller handles reset
+  if (lower === "default" || lower === "reset" || lower === "original") return NaN;
 
-  // Absolute number
   const num = parseFloat(lower);
   if (!isNaN(num)) return num;
-
   return current;
 }
+
+function resolveBool(value: string): boolean {
+  const lower = value.toLowerCase().trim();
+  return !(
+    lower === "false" || lower === "off" || lower === "hide" ||
+    lower === "no" || lower === "disable" || lower === "disabled"
+  );
+}
+
+function resolveEnum(value: string, options: string[]): string | null {
+  const lower = value.toLowerCase().trim();
+  // Direct match
+  const exact = options.find(o => o === lower);
+  if (exact) return exact;
+  // Partial match
+  const partial = options.find(o => lower.includes(o));
+  if (partial) return partial;
+  // Semantic mapping for common patterns
+  const semanticMap: Record<string, string[]> = {
+    auto: ["automatic", "proactive", "ambient", "on"],
+    manual: ["on_demand", "off", "stop", "disable"],
+  };
+  for (const [opt, synonyms] of Object.entries(semanticMap)) {
+    if (options.includes(opt) && synonyms.some(s => lower.includes(s))) return opt;
+  }
+  return null;
+}
+
+// ── Accent color hue map (for CSS var) ──
+const ACCENT_HUES: Record<string, string> = {
+  indigo: "239",
+  cyan: "188",
+  violet: "270",
+  emerald: "160",
+  rose: "350",
+  amber: "38",
+  slate: "215",
+};
+
+// ── Exported types ──
+export type VocabCardMode = "manual" | "auto";
 
 export type UIUpdatePayload = {
   component: string;
@@ -96,147 +332,121 @@ export interface UseUIPreferencesReturn {
   applyUpdate: (payload: UIUpdatePayload) => string;
   resetAll: () => void;
   cssVars: Record<string, string>;
+  getSchema: () => typeof SCHEMA;
+  getState: () => UIPreferences;
 }
 
 export function useUIPreferences(): UseUIPreferencesReturn {
   const [prefs, setPrefs] = useState<UIPreferences>(loadPrefs);
 
-  // Persist on change
-  useEffect(() => {
-    savePrefs(prefs);
-  }, [prefs]);
+  useEffect(() => { savePrefs(prefs); }, [prefs]);
 
   const applyUpdate = useCallback(
     (payload: UIUpdatePayload): string => {
       const { component, property, value } = payload;
-      const key = `${component}.${property}`;
-      console.log(`[ui-prefs] applyUpdate: ${key} = ${value}`);
+      const rawKey = `${component}.${property}`;
+      console.log(`[ui-prefs] applyUpdate: ${rawKey} = ${value}`);
 
-      setPrefs((prev) => {
-        const next = { ...prev };
+      // Global reset
+      if (
+        (component === "all" || component === "everything") &&
+        (property === "reset" || value.toLowerCase() === "reset")
+      ) {
+        setPrefs({ ...DEFAULTS });
+        return "Reset all UI settings to defaults.";
+      }
 
-        // Samuel avatar
-        if (component === "samuel" || component === "avatar" || component === "character" || component === "self" || component === "me" || component === "agent") {
-          if (property === "size" || property === "font_size") {
-            const v = resolveValue(prev.samuel_size, value, 40);
-            next.samuel_size = isNaN(v) ? DEFAULTS.samuel_size : clamp(v, 80, 800);
-          } else if (property === "opacity") {
-            const v = resolveValue(prev.samuel_opacity, value, 0.2);
-            next.samuel_opacity = isNaN(v) ? DEFAULTS.samuel_opacity : clamp(v, 0.1, 1);
-          }
+      // Resolve the canonical key
+      const canonical = ALIAS_MAP.get(rawKey);
+      if (!canonical) {
+        // Try fuzzy: component matches a prefix in SCHEMA keys
+        const fuzzy = Object.keys(SCHEMA).find(k =>
+          k.startsWith(`${component}.`) && k.endsWith(`.${property}`)
+        );
+        if (!fuzzy) {
+          console.warn(`[ui-prefs] unknown setting: ${rawKey}`);
+          return `Unknown setting: ${rawKey}. Use query_ui_state to see available settings.`;
         }
+        return applyOne(fuzzy, value);
+      }
 
-        // Speech bubble
-        if (component === "bubble" || component === "speech_bubble" || component === "text") {
-          if (property === "font_size" || property === "size") {
-            const v = resolveValue(prev.bubble_font_size, value, 2);
-            next.bubble_font_size = isNaN(v) ? DEFAULTS.bubble_font_size : clamp(v, 10, 32);
-          }
-        }
-
-        // Vocab/word card
-        if (component === "word_card" || component === "vocab_card" || component === "card") {
-          if (property === "visible") {
-            next.vocab_card_visible = value.toLowerCase() !== "hide" && value.toLowerCase() !== "false";
-          } else if (property === "position") {
-            const lower = value.toLowerCase();
-            if (lower.includes("left")) next.vocab_card_position = "left";
-            else if (lower.includes("right")) next.vocab_card_position = "right";
-          } else if (property === "mode") {
-            const lower = value.toLowerCase();
-            if (lower === "auto" || lower === "automatic" || lower === "proactive" || lower === "ambient") {
-              next.vocab_card_mode = "auto";
-            } else if (lower === "manual" || lower === "on_demand" || lower === "off" || lower === "stop") {
-              next.vocab_card_mode = "manual";
-            }
-          } else if (property === "frequency" || property === "interval") {
-            const lower = value.toLowerCase();
-            if (lower.includes("less") || lower.includes("fewer") || lower.includes("rarely") || lower.includes("slow")) {
-              next.vocab_card_interval = Math.min(prev.vocab_card_interval + 60, 600);
-            } else if (lower.includes("more") || lower.includes("often") || lower.includes("fast") || lower.includes("frequent")) {
-              next.vocab_card_interval = Math.max(prev.vocab_card_interval - 30, 20);
-            } else if (lower === "off" || lower === "never" || lower === "stop" || lower === "disable") {
-              next.vocab_card_mode = "manual";
-            } else if (lower === "default" || lower === "reset" || lower === "normal") {
-              next.vocab_card_interval = DEFAULTS.vocab_card_interval;
-            } else {
-              const num = parseInt(lower, 10);
-              if (!isNaN(num)) {
-                next.vocab_card_interval = clamp(num, 10, 600);
-                next.vocab_card_mode = "auto";
-              }
-            }
-          }
-        }
-
-        // Romaji / reading
-        if (component === "romaji") {
-          if (property === "visible") {
-            next.romaji_visible = value.toLowerCase() !== "hide" && value.toLowerCase() !== "false";
-          }
-        }
-        if (component === "reading" || component === "furigana" || component === "pinyin") {
-          if (property === "visible") {
-            next.reading_visible = value.toLowerCase() !== "hide" && value.toLowerCase() !== "false";
-          }
-        }
-
-        // Teach viewer
-        if (component === "teach" || component === "teach_viewer" || component === "lyrics_panel" || component === "subtitle_bar") {
-          if (property === "font_size" || property === "size") {
-            const v = resolveValue(prev.teach_font_size, value, 2);
-            next.teach_font_size = isNaN(v) ? DEFAULTS.teach_font_size : clamp(v, 10, 28);
-          }
-        }
-
-        // Privacy controls
-        if (component === "privacy") {
-          const on = value.toLowerCase() !== "false" && value.toLowerCase() !== "off";
-          if (property === "screen_watch_enabled") {
-            next.screen_watch_enabled = on;
-          } else if (property === "audio_listen_enabled") {
-            next.audio_listen_enabled = on;
-          } else if (property === "local_time_enabled") {
-            next.local_time_enabled = on;
-          } else if (property === "location_enabled") {
-            next.location_enabled = on;
-          }
-        }
-
-        // Global "all" — reset everything
-        if (component === "all" && (property === "reset" || value.toLowerCase() === "reset")) {
-          return { ...DEFAULTS };
-        }
-
-        console.log(`[ui-prefs] state change: samuel_size=${prev.samuel_size}->${next.samuel_size}, opacity=${prev.samuel_opacity}->${next.samuel_opacity}`);
-        return next;
-      });
-
-      return `Updated ${key} to ${value}.`;
+      return applyOne(canonical, value);
     },
     [],
   );
 
-  const resetAll = useCallback(() => {
-    setPrefs({ ...DEFAULTS });
-  }, []);
+  function applyOne(canonical: string, value: string): string {
+    const schema = SCHEMA[canonical];
+    if (!schema) return `Unknown setting: ${canonical}`;
 
-  // CSS custom properties derived from prefs
-  const cssVars = useMemo(
-    () => ({
-      "--samuel-size": `${prefs.samuel_size}px`,
-      "--samuel-opacity": `${prefs.samuel_opacity}`,
-      "--bubble-font-size": `${prefs.bubble_font_size}px`,
-      "--teach-font-size": `${prefs.teach_font_size}px`,
-      "--vocab-card-side": prefs.vocab_card_position === "left" ? "auto" : "20px",
-      "--vocab-card-side-left": prefs.vocab_card_position === "left" ? "20px" : "auto",
-    }),
-    [prefs],
-  );
+    setPrefs((prev) => {
+      const next = { ...prev };
 
-  return { prefs, applyUpdate, resetAll, cssVars };
+      if (schema.type === "number") {
+        const current = (prev[canonical] as number) ?? (schema.default as number);
+        const resolved = resolveNumeric(current, value, schema.step ?? 1);
+        const clamped = isNaN(resolved)
+          ? (schema.default as number)
+          : clamp(resolved, schema.min ?? 0, schema.max ?? 9999);
+        next[canonical] = clamped;
+      } else if (schema.type === "boolean") {
+        next[canonical] = resolveBool(value);
+      } else if (schema.type === "enum" && schema.options) {
+        const resolved = resolveEnum(value, schema.options);
+        if (resolved !== null) next[canonical] = resolved;
+      }
+
+      return next;
+    });
+
+    return `Updated ${canonical} to ${value}.`;
+  }
+
+  const resetAll = useCallback(() => { setPrefs({ ...DEFAULTS }); }, []);
+
+  const getSchema = useCallback(() => SCHEMA, []);
+  const getState = useCallback(() => prefs, [prefs]);
+
+  // Build CSS variables from schema
+  const cssVars = useMemo(() => {
+    const vars: Record<string, string> = {};
+    for (const [key, schema] of Object.entries(SCHEMA)) {
+      if (!schema.cssVar) continue;
+      const val = prefs[key] ?? schema.default;
+
+      // Special: accent color → hue number
+      if (key === "app.accent_color") {
+        vars[schema.cssVar] = ACCENT_HUES[val as string] ?? ACCENT_HUES.indigo;
+        continue;
+      }
+
+      const suffix = schema.unit === "px" ? "px"
+        : schema.unit === "s" ? "s"
+        : "";
+      vars[schema.cssVar] = `${val}${suffix}`;
+    }
+
+    // Derived vars that depend on computed values
+    const cardPos = prefs["word_card.position"] ?? "right";
+    vars["--vocab-card-side"] = cardPos === "left" ? "auto" : "20px";
+    vars["--vocab-card-side-left"] = cardPos === "left" ? "20px" : "auto";
+
+    return vars;
+  }, [prefs]);
+
+  return { prefs, applyUpdate, resetAll, cssVars, getSchema, getState };
 }
 
-function clamp(v: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, v));
+// ── Exported for tool descriptions ──
+export function getUISchemaDescription(): string {
+  const lines: string[] = [];
+  for (const [key, s] of Object.entries(SCHEMA)) {
+    let desc = `- ${key}: ${s.type}`;
+    if (s.type === "number") desc += ` (${s.min}–${s.max}, step ${s.step})`;
+    if (s.type === "enum" && s.options) desc += ` (${s.options.join(" | ")})`;
+    if (s.type === "boolean") desc += ` (true/false, show/hide, on/off)`;
+    desc += ` [default: ${s.default}]`;
+    lines.push(desc);
+  }
+  return lines.join("\n");
 }

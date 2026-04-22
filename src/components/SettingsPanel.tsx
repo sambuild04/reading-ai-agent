@@ -1,16 +1,63 @@
+import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import type { UIPreferences } from "../hooks/useUIPreferences";
 
-type ToggleKey = "screen_watch_enabled" | "audio_listen_enabled" | "local_time_enabled" | "location_enabled";
+type ToggleKey = "privacy.screen_watch" | "privacy.audio_listen" | "privacy.local_time" | "privacy.location";
 
 interface Props {
   visible: boolean;
   prefs: UIPreferences;
   onToggle: (key: ToggleKey) => void;
+  onResetPrefs: () => void;
   onClose: () => void;
 }
 
-export function SettingsPanel({ visible, prefs, onToggle, onClose }: Props) {
+export function SettingsPanel({ visible, prefs, onToggle, onResetPrefs, onClose }: Props) {
+  const [clearing, setClearing] = useState<string | null>(null);
+
   if (!visible) return null;
+
+  async function clearMemory() {
+    if (!confirm("Clear all of Samuel's memories (preferences, vocabulary, corrections)? This cannot be undone.")) return;
+    setClearing("memory");
+    try {
+      await invoke("memory_clear");
+    } catch {}
+    setClearing(null);
+  }
+
+  async function clearSecrets() {
+    if (!confirm("Delete all stored API keys and tokens? You will need to re-enter them.")) return;
+    setClearing("secrets");
+    try {
+      const keys = await invoke<string[]>("list_secrets");
+      for (const key of keys) {
+        await invoke("delete_secret", { name: key });
+      }
+    } catch {}
+    setClearing(null);
+  }
+
+  function clearLocalData() {
+    if (!confirm("Reset all UI preferences and local settings to defaults? The app will reload.")) return;
+    localStorage.clear();
+    onResetPrefs();
+    window.location.reload();
+  }
+
+  async function clearEverything() {
+    if (!confirm("Clear ALL data — memory, secrets, preferences, and plugins? This cannot be undone.")) return;
+    setClearing("all");
+    try { await invoke("memory_clear"); } catch {}
+    try {
+      const keys = await invoke<string[]>("list_secrets");
+      for (const key of keys) await invoke("delete_secret", { name: key });
+    } catch {}
+    localStorage.clear();
+    onResetPrefs();
+    setClearing(null);
+    window.location.reload();
+  }
 
   return (
     <div className="settings-overlay" onClick={onClose}>
@@ -31,8 +78,8 @@ export function SettingsPanel({ visible, prefs, onToggle, onClose }: Props) {
               </span>
             </div>
             <div
-              className={`settings-switch ${prefs.screen_watch_enabled ? "settings-switch-on" : ""}`}
-              onClick={() => onToggle("screen_watch_enabled")}
+              className={`settings-switch ${prefs["privacy.screen_watch"] ? "settings-switch-on" : ""}`}
+              onClick={() => onToggle("privacy.screen_watch")}
             >
               <div className="settings-switch-thumb" />
             </div>
@@ -46,8 +93,8 @@ export function SettingsPanel({ visible, prefs, onToggle, onClose }: Props) {
               </span>
             </div>
             <div
-              className={`settings-switch ${prefs.audio_listen_enabled ? "settings-switch-on" : ""}`}
-              onClick={() => onToggle("audio_listen_enabled")}
+              className={`settings-switch ${prefs["privacy.audio_listen"] ? "settings-switch-on" : ""}`}
+              onClick={() => onToggle("privacy.audio_listen")}
             >
               <div className="settings-switch-thumb" />
             </div>
@@ -61,8 +108,8 @@ export function SettingsPanel({ visible, prefs, onToggle, onClose }: Props) {
               </span>
             </div>
             <div
-              className={`settings-switch ${prefs.local_time_enabled ? "settings-switch-on" : ""}`}
-              onClick={() => onToggle("local_time_enabled")}
+              className={`settings-switch ${prefs["privacy.local_time"] ? "settings-switch-on" : ""}`}
+              onClick={() => onToggle("privacy.local_time")}
             >
               <div className="settings-switch-thumb" />
             </div>
@@ -76,12 +123,36 @@ export function SettingsPanel({ visible, prefs, onToggle, onClose }: Props) {
               </span>
             </div>
             <div
-              className={`settings-switch ${prefs.location_enabled ? "settings-switch-on" : ""}`}
-              onClick={() => onToggle("location_enabled")}
+              className={`settings-switch ${prefs["privacy.location"] ? "settings-switch-on" : ""}`}
+              onClick={() => onToggle("privacy.location")}
             >
               <div className="settings-switch-thumb" />
             </div>
           </label>
+        </div>
+
+        <div className="settings-section">
+          <div className="settings-section-title">Data Management</div>
+
+          <button className="settings-btn" onClick={clearMemory} disabled={clearing !== null}>
+            {clearing === "memory" ? "Clearing..." : "Clear Memory"}
+          </button>
+          <span className="settings-btn-desc">Erase Samuel's remembered preferences, vocabulary, and corrections</span>
+
+          <button className="settings-btn" onClick={clearSecrets} disabled={clearing !== null}>
+            {clearing === "secrets" ? "Clearing..." : "Clear API Keys"}
+          </button>
+          <span className="settings-btn-desc">Delete all stored API keys and tokens</span>
+
+          <button className="settings-btn" onClick={clearLocalData} disabled={clearing !== null}>
+            Reset Preferences
+          </button>
+          <span className="settings-btn-desc">Reset UI settings to defaults (reloads the app)</span>
+
+          <button className="settings-btn settings-btn-danger" onClick={clearEverything} disabled={clearing !== null}>
+            {clearing === "all" ? "Clearing..." : "Clear Everything"}
+          </button>
+          <span className="settings-btn-desc">Erase all data — memory, keys, preferences, and start fresh</span>
         </div>
 
         <div className="settings-section">

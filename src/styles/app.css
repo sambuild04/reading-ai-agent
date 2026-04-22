@@ -56,10 +56,11 @@ html, body, #root {
 /* ── Manga Speech Bubbles ────────────────────────────────── */
 .speech-bubble {
   position: relative;
-  max-width: 90%;
+  max-width: var(--bubble-max-width, 280px);
   max-height: 40vh;
   overflow-y: auto;
   padding: 14px 18px;
+  opacity: var(--bubble-opacity, 1);
   border-radius: 18px;
   font-size: var(--bubble-font-size, 15px);
   line-height: 1.5;
@@ -91,6 +92,11 @@ html, body, #root {
   color: #a5f3fc;
   border: 1px solid rgba(6, 182, 212, 0.2);
   align-self: center;
+}
+
+/* Transcript area font size override */
+.transcript-scroll {
+  font-size: var(--transcript-font-size, 14px);
 }
 
 /* Speech tail — triangular pointer connecting bubble to character */
@@ -652,7 +658,7 @@ html, body, #root {
   backdrop-filter: blur(24px) saturate(1.4);
   -webkit-backdrop-filter: blur(24px) saturate(1.4);
   border: 1px solid rgba(99, 102, 241, 0.25);
-  border-radius: 20px;
+  border-radius: calc(var(--app-radius, 14px) + 6px);
   padding: 20px;
   box-shadow:
     0 0 0 1px rgba(99, 102, 241, 0.1),
@@ -751,9 +757,10 @@ html, body, #root {
 /* Tool-driven word card body */
 .word-card-body {
   padding: 4px 0 8px;
+  font-size: var(--word-card-font-size, 13px);
 }
 .word-card-word {
-  font-size: 28px;
+  font-size: calc(var(--word-card-font-size, 13px) * 2.15);
   font-weight: 700;
   color: #f0f4f8;
   margin-bottom: 2px;
@@ -1003,9 +1010,9 @@ html, body, #root {
 .teach-panel {
   width: 520px;
   max-height: 85vh;
-  background: rgba(10, 15, 30, 0.96);
+  background: rgba(10, 15, 30, var(--teach-opacity, 0.95));
   border: 1px solid rgba(99, 102, 241, 0.2);
-  border-radius: 24px;
+  border-radius: var(--app-radius, 14px);
   padding: 20px 24px;
   display: flex;
   flex-direction: column;
@@ -1774,21 +1781,56 @@ html, body, #root {
   margin: 0;
 }
 
+.settings-btn {
+  width: 100%;
+  padding: 8px 12px;
+  margin-top: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.settings-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+}
+.settings-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.settings-btn-danger {
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #ef4444;
+}
+.settings-btn-danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.15);
+}
+.settings-btn-desc {
+  display: block;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.3);
+  margin: 2px 0 6px 0;
+  line-height: 1.4;
+}
+
 /* ── Lyrics HUD — floating holographic panel (non-blocking) ── */
 .lyrics-hud {
   position: fixed;
-  left: 8px;
-  top: 40px;
+  left: var(--lyrics-left, 8px);
+  top: var(--lyrics-top, 40px);
   bottom: 60px;
-  width: 185px;
+  width: var(--lyrics-width, 185px);
+  font-size: var(--lyrics-font-size, 12px);
   z-index: 120;
   display: flex;
   flex-direction: column;
-  background: rgba(10, 14, 30, 0.55);
+  background: rgba(10, 14, 30, var(--lyrics-opacity, 0.55));
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
   border: 1px solid rgba(99, 102, 241, 0.15);
-  border-radius: 14px;
+  border-radius: var(--app-radius, 14px);
   padding: 8px 6px 6px;
   box-shadow:
     0 0 20px rgba(99, 102, 241, 0.08),
@@ -1884,7 +1926,7 @@ html, body, #root {
 }
 
 .lyrics-hud-text {
-  font-size: 12px;
+  font-size: var(--lyrics-font-size, 12px);
   color: rgba(226, 232, 240, 0.85);
   line-height: 1.4;
 }

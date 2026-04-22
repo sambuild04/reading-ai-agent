@@ -630,6 +630,26 @@ export function useRealtime(): UseRealtimeReturn {
             content: [{ type: "input_text", text: timeCtx }],
           },
         });
+
+        // Load saved skills and inject summaries so Samuel knows what workflows are available
+        invoke<Array<{ id: string; title: string; trigger: string; summary: string }>>("skill_list_summaries")
+          .then((skills) => {
+            if (skills.length > 0) {
+              const listing = skills.map((s) => `- ${s.title} [${s.id}]: ${s.summary} (trigger: ${s.trigger})`).join("\n");
+              const skillCtx = `[System: You have ${skills.length} saved skill(s). Before complex tasks, check if one applies:\n${listing}\nUse skill_manage(action="get", id="...") to load the full steps.]`;
+              session.transport.sendEvent({
+                type: "conversation.item.create",
+                item: {
+                  type: "message",
+                  role: "user",
+                  content: [{ type: "input_text", text: skillCtx }],
+                },
+              });
+              console.log(`[skills] injected ${skills.length} skill summaries into session`);
+            }
+          })
+          .catch((err) => console.warn("[skills] failed to load summaries:", err));
+
         session.transport.sendEvent({ type: "response.create" });
       }
 

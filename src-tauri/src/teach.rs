@@ -150,15 +150,17 @@ fn find_yt_dlp() -> Result<String, String> {
 fn download_youtube_audio(yt_dlp: &str, url: &str) -> Option<String> {
     let audio_file = "/tmp/samuel-teach-audio.m4a".to_string();
     let _ = fs::remove_file(&audio_file);
+    let clean_url = strip_playlist_params(url);
     eprintln!("[teach] youtube: downloading audio for playback...");
     match run_with_timeout(
         Command::new(yt_dlp).args([
             "-x", "--audio-format", "m4a",
             "--audio-quality", "5",
+            "--no-playlist",
             "--socket-timeout", "15",
             "--no-warnings",
             "-o", &audio_file,
-            url,
+            &clean_url,
         ]),
         90,
     ) {
@@ -174,6 +176,112 @@ fn download_youtube_audio(yt_dlp: &str, url: &str) -> Option<String> {
     }
 }
 
+/// Try to fetch lyrics from LRCLIB using the video title.
+/// Returns parsed lines if found, None otherwise. Non-blocking fallback.
+fn try_lrclib_lyrics(title: &str) -> Option<Vec<ContentLine>> {
+    // Clean the title: strip common YouTube noise
+    let clean = title
+        .replace("【", " ").replace("】", " ")
+        .replace("「", " ").replace("」", " ")
+        .replace("（", " ").replace("）", " ");
+    // Take a reasonable search query from the title
+    let query: String = clean.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
+    if query.len() < 3 { return None; }
+
+    eprintln!("[teach] trying LRCLIB search: {query}");
+    let url = format!(
+        "https://lrclib.net/api/search?q={}",
+        crate::commands::urlencoding_str(&query)
+    );
+
+    let output = Command::new("/usr/bin/curl")
+        .args(["-s", "--max-time", "5", "-L", &url])
+        .output()
+        .ok()?;
+
+    if !output.status.success() { return None; }
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let results = json.as_array()?;
+    if results.is_empty() { return None; }
+
+    // Prefer synced lyrics, fall back to plain
+    let best = &results[0];
+    if let Some(synced) = best["syncedLyrics"].as_str() {
+        let lines = parse_lrc_synced(synced);
+        if !lines.is_empty() {
+            eprintln!("[teach] LRCLIB: found synced lyrics ({} lines)", lines.len());
+            return Some(lines);
+        }
+    }
+    if let Some(plain) = best["plainLyrics"].as_str() {
+        let lines: Vec<ContentLine> = plain.lines()
+            .filter(|l| !l.trim().is_empty())
+            .enumerate()
+            .map(|(i, l)| ContentLine { text: l.trim().to_string(), timestamp: None, source_index: i })
+            .collect();
+        if !lines.is_empty() {
+            eprintln!("[teach] LRCLIB: found plain lyrics ({} lines)", lines.len());
+            return Some(lines);
+        }
+    }
+
+    None
+}
+
+/// Parse LRC synced format: [mm:ss.xx] text
+fn parse_lrc_synced(lrc: &str) -> Vec<ContentLine> {
+    let mut lines = Vec::new();
+    let mut idx = 0;
+    for raw in lrc.lines() {
+        // Match [01:23.45] or [1:23.456]
+        let text_start = match raw.find(']') {
+            Some(p) => p + 1,
+            None => continue,
+        };
+        let ts_str = &raw[1..text_start - 1];
+        let text = raw[text_start..].trim();
+        if text.is_empty() { continue; }
+
+        let timestamp = parse_lrc_timestamp(ts_str);
+        lines.push(ContentLine { text: text.to_string(), timestamp, source_index: idx });
+        idx += 1;
+    }
+    lines
+}
+
+fn parse_lrc_timestamp(ts: &str) -> Option<f64> {
+    let parts: Vec<&str> = ts.split(':').collect();
+    if parts.len() == 2 {
+        let mins: f64 = parts[0].parse().ok()?;
+        let secs: f64 = parts[1].parse().ok()?;
+        Some(mins * 60.0 + secs)
+    } else {
+        None
+    }
+}
+
+/// Strip playlist/index params from a YouTube URL so yt-dlp fetches only the single video.
+fn strip_playlist_params(url: &str) -> String {
+    if let Some(q) = url.find('?') {
+        let base = &url[..q];
+        let params: Vec<&str> = url[q + 1..]
+            .split('&')
+            .filter(|p| {
+                let key = p.split('=').next().unwrap_or("");
+                key != "list" && key != "index" && key != "start_radio"
+            })
+            .collect();
+        if params.is_empty() {
+            base.to_string()
+        } else {
+            format!("{}?{}", base, params.join("&"))
+        }
+    } else {
+        url.to_string()
+    }
+}
+
 // ── Extractors ───────────────────────────────────────────────────────────────
 
 /// Returns (lines, title, audio_path_if_downloaded)
@@ -186,9 +294,13 @@ fn extract_youtube(url: &str) -> Result<(Vec<ContentLine>, String, Option<String
     let _ = fs::remove_file("/tmp/samuel-teach-subs.ja-orig.vtt");
     let _ = fs::remove_file("/tmp/samuel-teach-subs.en.vtt");
 
+    // Strip playlist params to avoid yt-dlp getting stuck resolving playlist metadata
+    let clean_url = strip_playlist_params(url);
+
     let sub_output = run_with_timeout(
         Command::new(&yt_dlp).args([
             "--skip-download",
+            "--no-playlist",
             "--write-auto-subs",
             "--sub-lang", "ja,en,ja-*",
             "--sub-format", "vtt",
@@ -196,7 +308,7 @@ fn extract_youtube(url: &str) -> Result<(Vec<ContentLine>, String, Option<String
             "--socket-timeout", "15",
             "--no-warnings",
             "-o", "/tmp/samuel-teach-subs",
-            url,
+            &clean_url,
         ]),
         45,
     )
@@ -221,13 +333,22 @@ fn extract_youtube(url: &str) -> Result<(Vec<ContentLine>, String, Option<String
     for path in &sub_patterns {
         if let Ok(vtt) = fs::read_to_string(path) {
             eprintln!("[teach] youtube: found subtitle file {path} ({} bytes)", vtt.len());
-            let lines = parse_vtt(&vtt);
+            let vtt_lines = parse_vtt(&vtt);
             for p in &sub_patterns {
                 let _ = fs::remove_file(p);
             }
-            if !lines.is_empty() {
-                eprintln!("[teach] youtube: parsed {} subtitle lines", lines.len());
-                // Subtitles found — still download audio for playback
+            if !vtt_lines.is_empty() {
+                eprintln!("[teach] youtube: parsed {} subtitle lines from VTT", vtt_lines.len());
+
+                // Auto-subs are often inaccurate for songs — try LRCLIB as a better source
+                let lines = match try_lrclib_lyrics(&title) {
+                    Some(better) => {
+                        eprintln!("[teach] youtube: using LRCLIB lyrics ({} lines) instead of auto-subs", better.len());
+                        better
+                    }
+                    None => vtt_lines,
+                };
+
                 let audio_path = download_youtube_audio(&yt_dlp, url);
                 return Ok((lines, title, audio_path));
             }
@@ -263,11 +384,17 @@ fn extract_youtube(url: &str) -> Result<(Vec<ContentLine>, String, Option<String
     }
 
     let file_size = fs::metadata(&audio_file).map(|m| m.len()).unwrap_or(0);
-    eprintln!("[teach] youtube: audio downloaded ({file_size} bytes), transcribing...");
+    eprintln!("[teach] youtube: audio downloaded ({file_size} bytes)");
 
+    // Try LRCLIB first — human-transcribed lyrics are far more accurate than Whisper for songs
+    if let Some(lrc_lines) = try_lrclib_lyrics(&title) {
+        eprintln!("[teach] youtube: using LRCLIB lyrics ({} lines) instead of Whisper", lrc_lines.len());
+        return Ok((lrc_lines, title, Some(audio_file)));
+    }
+
+    eprintln!("[teach] youtube: no LRCLIB lyrics, transcribing with Whisper...");
     let config = read_config_internal()?;
     let api_key = config.api_key.ok_or("No API key")?;
-    // Use segmented transcription to get individual lines with timestamps
     let lines = transcribe_file_segmented(&audio_file, &api_key, "ja")?;
     eprintln!("[teach] youtube: transcription done ({} segments)", lines.len());
 
@@ -404,7 +531,7 @@ fn extract_article(url: &str) -> Result<(Vec<ContentLine>, String), String> {
     Ok((lines, title))
 }
 
-fn extract_html_tag(html: &str, tag: &str) -> Option<String> {
+pub fn extract_html_tag(html: &str, tag: &str) -> Option<String> {
     let open = format!("<{}", tag);
     let close = format!("</{}>", tag);
     let start = html.find(&open)?;
@@ -557,6 +684,9 @@ fn annotate_content(
    - For Japanese: include furigana reading. For Chinese: include pinyin. For Korean: include romanization.
    - Pick 10-20 words max, prioritize words a learner would benefit from most.
    - line_index = the [N] number of the line where this word appears.
+   - IMPORTANT: The source text may come from auto-generated subtitles or speech recognition,
+     which can contain errors (wrong kanji, garbled words, incorrect word boundaries).
+     Use the correct/standard form of each word in your annotations, not the transcription error.
 
 2. "grammar": array of notable grammar patterns. Each entry:
    {{"pattern": "...", "explanation": "...", "example": "...", "line_index": N}}
@@ -685,6 +815,7 @@ fn transcribe_file_segmented(path: &str, api_key: &str, lang: &str) -> Result<Ve
             "-F", "model=whisper-1",
             "-F", &format!("language={lang}"),
             "-F", "response_format=verbose_json",
+            "-F", "prompt=Transcribe the song lyrics accurately. This is a Japanese song. Pay close attention to each word and phrase.",
         ])
         .output()
         .map_err(|e| {

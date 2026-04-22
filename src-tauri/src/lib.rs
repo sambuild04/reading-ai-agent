@@ -20,9 +20,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            commands::cleanup_temp_files();
-            flashcards::cleanup();
-
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -69,6 +66,7 @@ pub fn run() {
             stop_learning_audio,
             check_learning_audio,
             get_selected_text,
+            memory_clear,
             memory_get_context,
             memory_set_fact,
             memory_mark_known,
@@ -99,6 +97,11 @@ pub fn run() {
             fetch_genius_lyrics,
             web_search,
             web_read,
+            agent_write_file,
+            agent_read_file,
+            agent_list_directory,
+            skill_list_summaries,
+            skill_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

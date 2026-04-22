@@ -34,6 +34,8 @@ export interface AnnotatedContent {
   synced?: boolean;
   /** Local path to downloaded audio file (YouTube songs) */
   audio_file?: string | null;
+  /** Which lyrics source was used (e.g. "genius", "lrclib", "whisper") */
+  lyrics_source?: string | null;
 }
 
 export type TeachState = "idle" | "input" | "processing" | "ready" | "error";
@@ -108,8 +110,8 @@ export function useTeachMode(): UseTeachModeReturn {
           }).then((r) => ({
             ...r,
             videoId: vid ?? undefined,
-            // Whisper segmented transcription now returns timestamps
             synced: r.lines.some((l) => l.timestamp !== null),
+            lyrics_source: "whisper",
           }));
         }
 
@@ -132,6 +134,7 @@ export function useTeachMode(): UseTeachModeReturn {
           videoId: result.videoId,
           synced: result.synced,
           audio_file: audioPath,
+          lyrics_source: result.source,
         }));
       })
       .then((result) => {

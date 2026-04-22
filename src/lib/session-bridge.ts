@@ -184,6 +184,38 @@ export function setLyricsContent(title: string, lines: string[]): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Song lyrics source tracking + hot-swap
+// ---------------------------------------------------------------------------
+
+type ContentLine = import("../hooks/useTeachMode").ContentLine;
+type UpdateSongLinesFn = (lines: ContentLine[]) => void;
+type GetSongMetaFn = () => { title: string | null; source: string | null; videoId: string | null; lines: ContentLine[] };
+
+let updateSongLinesFn: UpdateSongLinesFn | null = null;
+let getSongMetaFn: GetSongMetaFn | null = null;
+
+export function registerUpdateSongLines(fn: UpdateSongLinesFn | null) {
+  updateSongLinesFn = fn;
+}
+
+export function registerGetSongMeta(fn: GetSongMetaFn | null) {
+  getSongMetaFn = fn;
+}
+
+/** Replace the current song lyrics in-place (hot-swap). */
+export function updateSongLines(lines: import("../hooks/useTeachMode").ContentLine[]): boolean {
+  if (!updateSongLinesFn) return false;
+  updateSongLinesFn(lines);
+  return true;
+}
+
+/** Get metadata + current lines for the loaded song. */
+export function getSongMeta(): { title: string | null; source: string | null; videoId: string | null; lines: ContentLine[] } {
+  if (!getSongMetaFn) return { title: null, source: null, videoId: null, lines: [] };
+  return getSongMetaFn();
+}
+
+// ---------------------------------------------------------------------------
 // Show Word Card bridge (on-demand, tool-driven)
 // ---------------------------------------------------------------------------
 

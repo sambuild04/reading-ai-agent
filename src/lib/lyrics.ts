@@ -40,25 +40,45 @@ function parseSongInfo(title: string, author: string): { track: string; artist: 
   let track = title;
   let artist = author;
 
+  // Strip bracketed metadata: (cover), [Official MV], 【フルver】, etc.
   track = track
-    .replace(/\s*[\[【(（].*?(official|mv|music video|pv|full|lyric|ノンクレジット|OP|ED|opening|ending).*?[\]】)）]/gi, "")
+    .replace(/\s*[\[【(（].*?(official|mv|music video|pv|full|lyric|ノンクレジット|OP|ED|opening|ending|cover|ver|カバー|フル).*?[\]】)）]/gi, "")
     .trim();
 
+  // Strip everything after ｜ or | (often show/anime credits)
+  track = track.replace(/\s*[｜|].+$/, "").trim();
+
+  // "Artist - Track" pattern
   const dashMatch = track.match(/^(.+?)\s*[-–—]\s*(.+)$/);
   if (dashMatch) {
     artist = dashMatch[1].trim();
     track = dashMatch[2].trim();
   }
 
+  // "Track / Artist" pattern
   const slashMatch = track.match(/^(.+?)\s*\/\s*(.+)$/);
   if (slashMatch) {
     track = slashMatch[1].trim();
     artist = slashMatch[2].trim();
   }
 
+  // Japanese quotes 「Track」
   const bracketMatch = track.match(/「(.+?)」/);
   if (bracketMatch) {
     track = bracketMatch[1].trim();
+  }
+
+  // Strip loose suffixes: フルver, full ver, cover, カバー
+  track = track.replace(/\s+(フルver|full\s*ver\.?|cover|カバー)\s*$/gi, "").trim();
+
+  // Strip character/cast names after the core song+artist (common in anime covers)
+  // e.g. "キセキ GReeeen  綾小路清隆＆椎名ひより" → "キセキ GReeeen"
+  // Heuristic: if multiple double-width spaces or very long, truncate at reasonable boundary
+  if (track.length > 40) {
+    const dblSpace = track.indexOf("  ");
+    if (dblSpace > 5) {
+      track = track.slice(0, dblSpace).trim();
+    }
   }
 
   return { track, artist };
