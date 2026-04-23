@@ -1933,132 +1933,142 @@ pub struct SearchResult {
     pub snippet: String,
 }
 
-/// Search the web via DuckDuckGo and return top results.
+/// Search the web via SerpAPI (Google) with Brave HTML fallback.
 #[tauri::command]
 pub async fn web_search(query: String) -> Result<Vec<SearchResult>, String> {
     eprintln!("[web] searching: {query}");
 
-    let encoded = urlencoding(&query);
-    let url = format!("https://html.duckduckgo.com/html/?q={encoded}");
+    // Try SerpAPI first (requires SERPAPI_KEY in secrets store)
+    let secrets = crate::secrets::load_secrets();
+    if let Some(api_key) = secrets.entries.get("SERPAPI_KEY") {
+        let results = search_serpapi(&query, api_key)?;
+        if !results.is_empty() {
+            eprintln!("[web] serpapi: {} results", results.len());
+            return Ok(results);
+        }
+        eprintln!("[web] serpapi returned 0 results, falling back to Brave");
+    }
+
+    // Fallback: Brave Search HTML scraping
+    let results = search_brave(&query)?;
+    eprintln!("[web] brave: {} results", results.len());
+    Ok(results)
+}
+
+fn search_serpapi(query: &str, api_key: &str) -> Result<Vec<SearchResult>, String> {
+    let encoded = urlencoding(query);
+    let url = format!(
+        "https://serpapi.com/search.json?q={encoded}&api_key={api_key}&engine=google&num=8"
+    );
+
+    let out = Command::new("/usr/bin/curl")
+        .args(["-s", "--max-time", "15", "-L", &url])
+        .output()
+        .map_err(|e| format!("serpapi curl: {e}"))?;
+
+    if !out.status.success() {
+        return Err("SerpAPI request failed".into());
+    }
+
+    let body = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("SerpAPI JSON parse: {e}"))?;
+
+    let mut results = Vec::new();
+
+    if let Some(organic) = json.get("organic_results").and_then(|v| v.as_array()) {
+        for item in organic.iter().take(8) {
+            let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let url = item.get("link").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let snippet = item.get("snippet").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if !title.is_empty() && !url.is_empty() {
+                results.push(SearchResult { title, url, snippet });
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+fn search_brave(query: &str) -> Result<Vec<SearchResult>, String> {
+    let encoded = urlencoding(query);
+    let url = format!("https://search.brave.com/search?q={encoded}");
 
     let out = Command::new("/usr/bin/curl")
         .args([
             "-s", "--max-time", "10", "-L",
-            "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+            "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "-H", "Accept: text/html,application/xhtml+xml",
             &url,
         ])
         .output()
-        .map_err(|e| format!("curl: {e}"))?;
+        .map_err(|e| format!("brave curl: {e}"))?;
 
     if !out.status.success() {
-        return Err("Search request failed".into());
+        return Err("Brave search request failed".into());
     }
 
     let html = String::from_utf8_lossy(&out.stdout);
-    let results = parse_ddg_results(&html);
-    eprintln!("[web] found {} results", results.len());
-    Ok(results)
+    parse_brave_results(&html)
 }
 
-fn parse_ddg_results(html: &str) -> Vec<SearchResult> {
+fn parse_brave_results(html: &str) -> Result<Vec<SearchResult>, String> {
     let mut results = Vec::new();
-    let marker = "class=\"result__a\"";
+    let title_marker = "search-snippet-title";
     let mut pos = 0;
 
-    while let Some(idx) = html[pos..].find(marker) {
+    while let Some(idx) = html[pos..].find(title_marker) {
         let abs = pos + idx;
 
-        // Extract href
-        let before = &html[abs.saturating_sub(200)..abs];
-        let href = before.rfind("href=\"")
-            .and_then(|h| {
-                let start = h + 6;
-                let slice = &before[start..];
-                slice.find('"').map(|end| slice[..end].to_string())
-            });
-
-        // Extract title text (between > and </a>)
-        let after_marker = &html[abs..];
-        let title = after_marker.find('>')
-            .and_then(|gt| {
-                let content_start = gt + 1;
-                after_marker[content_start..].find("</a>").map(|end| {
-                    strip_html_to_text(&after_marker[content_start..content_start + end])
-                        .trim()
-                        .to_string()
-                })
-            });
-
-        // Extract snippet from result__snippet
-        let snippet_text = html[abs..].find("class=\"result__snippet\"")
-            .and_then(|s_idx| {
-                let s_abs = abs + s_idx;
-                html[s_abs..].find('>').and_then(|gt| {
-                    let start = s_abs + gt + 1;
-                    html[start..].find("</").map(|end| {
-                        strip_html_to_text(&html[start..start + end])
-                            .trim()
-                            .to_string()
-                    })
-                })
+        // Extract title from the title="..." attribute on this element
+        let region = &html[abs..std::cmp::min(abs + 500, html.len())];
+        let title = region.find("title=\"").and_then(|t| {
+            let start = t + 7;
+            region[start..].find('"').map(|end| {
+                html_entity_decode(&region[start..start + end])
             })
-            .unwrap_or_default();
+        });
 
-        if let (Some(mut url), Some(title)) = (href, title) {
-            if !title.is_empty() {
-                // DuckDuckGo wraps URLs in a redirect; extract the real URL
-                if let Some(u_start) = url.find("uddg=") {
-                    let raw = &url[u_start + 5..];
-                    let end = raw.find('&').unwrap_or(raw.len());
-                    if let Ok(decoded) = urlencoding_decode(&raw[..end]) {
-                        url = decoded;
+        // Extract URL from the nearest preceding href="https://..."
+        let before_start = abs.saturating_sub(500);
+        let before = &html[before_start..abs];
+        let url = before.rfind("href=\"https://").and_then(|h| {
+            let start = h + 6;
+            before[start..].find('"').map(|end| before[start..start + end].to_string())
+        });
+
+        if let (Some(title), Some(url)) = (title, url) {
+            if !title.is_empty()
+                && !url.contains("brave.com")
+                && !url.contains("cdn.search")
+            {
+                // Skip duplicates
+                if !results.iter().any(|r: &SearchResult| r.url == url) {
+                    results.push(SearchResult {
+                        title,
+                        url,
+                        snippet: String::new(),
+                    });
+                    if results.len() >= 8 {
+                        break;
                     }
-                }
-                results.push(SearchResult {
-                    title,
-                    url,
-                    snippet: snippet_text,
-                });
-                if results.len() >= 8 {
-                    break;
                 }
             }
         }
 
-        pos = abs + marker.len();
+        pos = abs + title_marker.len();
     }
 
-    results
+    Ok(results)
 }
 
-fn urlencoding_decode(s: &str) -> Result<String, String> {
-    let mut out = String::new();
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hi = hex_val(bytes[i + 1]).ok_or("bad hex")?;
-            let lo = hex_val(bytes[i + 2]).ok_or("bad hex")?;
-            out.push((hi << 4 | lo) as char);
-            i += 3;
-        } else if bytes[i] == b'+' {
-            out.push(' ');
-            i += 1;
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    Ok(out)
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(10 + b - b'a'),
-        b'A'..=b'F' => Some(10 + b - b'A'),
-        _ => None,
-    }
+fn html_entity_decode(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
 }
 
 /// Fetch a web page and return its readable text content.

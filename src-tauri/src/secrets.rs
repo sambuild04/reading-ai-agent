@@ -7,9 +7,9 @@ const SAMUEL_DIR: &str = ".samuel";
 const SECRETS_FILE: &str = "secrets.json";
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
-struct SecretsStore {
+pub struct SecretsStore {
     #[serde(flatten)]
-    entries: HashMap<String, String>,
+    pub entries: HashMap<String, String>,
 }
 
 fn secrets_path() -> Result<PathBuf, String> {
@@ -21,7 +21,7 @@ fn secrets_path() -> Result<PathBuf, String> {
     Ok(dir.join(SECRETS_FILE))
 }
 
-fn load_secrets() -> SecretsStore {
+pub fn load_secrets() -> SecretsStore {
     let Ok(path) = secrets_path() else {
         return SecretsStore::default();
     };

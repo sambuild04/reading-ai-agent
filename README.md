@@ -131,7 +131,7 @@ Samuel can search the internet and read web pages on his own:
 
 ```
 You:     "Search for the lyrics of 冷たく暗い by Aimer"
-Samuel:  *searches DuckDuckGo → finds lyrics page → reads it → shows lyrics in floating panel*
+Samuel:  *searches Google → finds lyrics page → reads it → shows lyrics in floating panel*
 
 You:     "Look up the N3 grammar point ～ようにする"
 Samuel:  *searches → reads a grammar explanation site → teaches you with examples*
@@ -265,7 +265,7 @@ All tools use structured error responses with fallback chains. Related tools are
 | Plugin Runtime | `new Function()` + secrets injection |
 | Song Audio | [yt-dlp](https://github.com/yt-dlp/yt-dlp) + HTML5 Audio |
 | Lyrics | [LRCLIB](https://lrclib.net) + [Genius](https://genius.com) + web search fallback |
-| Web Browsing | DuckDuckGo (search) + curl (page reading) |
+| Web Browsing | [SerpAPI](https://serpapi.com) (Google search) + Brave fallback + curl (page reading) |
 | Animation | [Rive](https://rive.app) |
 | Screen Capture | [Peekaboo](https://github.com/nicklama/peekaboo) + macOS `screencapture` |
 | Audio Capture | ScreenCaptureKit (Swift), PID-level filtering |
