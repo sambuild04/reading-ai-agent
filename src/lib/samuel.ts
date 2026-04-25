@@ -2,7 +2,7 @@ import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import { z } from "zod";
 import { invoke } from "@tauri-apps/api/core";
 import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, notifyTeachContent, applyUIUpdate, dismissCurrentCard, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, playSongLines, pauseSong, showWordCard, setCardMode, toggleLyricsView, setLyricsContent, updateSongLines, getSongMeta } from "./session-bridge";
-import { loadPlugin } from "./plugin-loader";
+import { loadPlugin, triggerRepair, getLastExecution } from "./plugin-loader";
 
 interface CaptureResult {
   base64: string;
@@ -449,8 +449,10 @@ const updateUITool = tool({
     "word_card.interval (10-600s), word_card.font_size (10-24px)\n" +
     "ANNOTATIONS: romaji.visible (show/hide), reading.visible (show/hide)\n" +
     "TEACH VIEWER: teach.font_size (10-28px), teach.opacity (0.3-1)\n" +
-    "LYRICS PANEL: lyrics.width (120-500px), lyrics.font_size (9-22px), lyrics.opacity (0.2-1)\n" +
+    "LYRICS PANEL: lyrics.width (120-500px), lyrics.font_size (9-22px), lyrics.opacity (0.2-1), " +
+    "lyrics.left (0-800px, position from left edge), lyrics.top (0-600px, position from top)\n" +
     "TRANSCRIPT: transcript.font_size (10-24px)\n" +
+    "WINDOW: window.width (400-1200px), window.height (400-1200px) — resizes the app window\n" +
     "APP: app.background_opacity (0.2-1), app.accent_color (indigo/cyan/violet/emerald/rose/amber/slate), " +
     "app.border_radius (0-30px)\n" +
     "PRIVACY: privacy.screen_watch, privacy.audio_listen, privacy.local_time, privacy.location (on/off)\n" +
@@ -462,13 +464,13 @@ const updateUITool = tool({
       .string()
       .describe(
         "The UI component: avatar, bubble, word_card, romaji, reading, teach, lyrics, " +
-        "transcript, app, privacy, all.",
+        "transcript, window, app, privacy, all.",
       ),
     property: z
       .string()
       .describe(
-        "The property to change: size, font_size, opacity, width, max_width, visible, " +
-        "position, mode, interval, accent_color, background_opacity, border_radius, " +
+        "The property to change: size, font_size, opacity, width, height, max_width, visible, " +
+        "position, left, top, mode, interval, accent_color, background_opacity, border_radius, " +
         "screen_watch, audio_listen, local_time, location, reset.",
       ),
     value: z
@@ -594,26 +596,124 @@ const storeSecretTool = tool({
 });
 
 // ---------------------------------------------------------------------------
+// OAuth — Connect to third-party services (Gmail, GitHub, Spotify, etc.)
+// ---------------------------------------------------------------------------
+
+interface OAuthResult {
+  provider: string;
+  token_key: string;
+  success: boolean;
+  message: string;
+}
+
+const oauthConnectTool = tool({
+  name: "oauth_connect",
+  description:
+    "Connect to a third-party service via OAuth. Opens the user's browser for sign-in, " +
+    "catches the callback, exchanges for tokens, and stores them securely.\n" +
+    "Actions:\n" +
+    "- 'connect': Start OAuth flow. Opens browser, user signs in, token stored automatically.\n" +
+    "  Known providers: google, github, spotify (auto-configured endpoints).\n" +
+    "  Custom providers: pass auth_url + token_url + client_id.\n" +
+    "- 'refresh': Refresh an expired token (uses stored refresh_token).\n" +
+    "- 'check': Check if a provider is already connected (has stored tokens).\n\n" +
+    "Known providers (google, github, spotify) have BUILT-IN credentials — just connect, no setup.\n" +
+    "For custom providers: pass auth_url, token_url, and client_id.\n\n" +
+    "After connecting, create a plugin that uses the stored token to call the service's API.\n" +
+    "Example: secrets.get('GOOGLE_ACCESS_TOKEN') in a plugin to call Gmail API.\n" +
+    "DO NOT ask users for client IDs for known providers. It just works.",
+  parameters: z.object({
+    action: z.enum(["connect", "refresh", "check"]).describe("OAuth action"),
+    provider: z.string().describe("Provider name: 'google', 'github', 'spotify', or custom name"),
+    scopes: z.string().optional().describe("OAuth scopes (space-separated). E.g. 'https://www.googleapis.com/auth/gmail.readonly' for Gmail"),
+    auth_url: z.string().optional().describe("For custom providers: authorization URL"),
+    token_url: z.string().optional().describe("For custom providers: token exchange URL"),
+    client_id: z.string().optional().describe("Override client ID (or use stored secret)"),
+    client_secret: z.string().optional().describe("Override client secret (or use stored secret)"),
+  }),
+  async execute({ action, provider, scopes, auth_url, token_url, client_id, client_secret }) {
+    if (action === "check") {
+      try {
+        const prefix = provider.toUpperCase();
+        const token = await invoke<string | null>("get_secret", { name: `${prefix}_ACCESS_TOKEN` });
+        if (token) {
+          const expiresAt = await invoke<string | null>("get_secret", { name: `${prefix}_TOKEN_EXPIRES_AT` });
+          const expired = expiresAt ? Number(expiresAt) < Date.now() / 1000 : false;
+          const status = expired ? "connected but token expired (use refresh)" : "connected";
+          logAction("oauth_connect", { provider }, true, status, "check");
+          return toolOk(`${provider}: ${status}`, { connected: true, expired });
+        }
+        logAction("oauth_connect", { provider }, true, "not connected", "check");
+        return toolOk(`${provider}: not connected. Use action='connect' to sign in.`, { connected: false });
+      } catch (err) {
+        return toolErr("unknown", `Check failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    if (action === "refresh") {
+      try {
+        const result = await invoke<OAuthResult>("oauth_refresh", {
+          provider,
+          customTokenUrl: token_url ?? null,
+          customClientId: client_id ?? null,
+          customClientSecret: client_secret ?? null,
+        });
+        logAction("oauth_connect", { provider }, result.success, result.message, "refresh");
+        return result.success ? toolOk(result.message) : toolErr("network", result.message);
+      } catch (err) {
+        const msg = `Refresh failed: ${err instanceof Error ? err.message : String(err)}`;
+        logAction("oauth_connect", { provider }, false, msg, "refresh");
+        return toolErr("network", msg);
+      }
+    }
+
+    // connect
+    try {
+      const result = await invoke<OAuthResult>("oauth_flow", {
+        provider,
+        scopes: scopes ?? null,
+        customAuthUrl: auth_url ?? null,
+        customTokenUrl: token_url ?? null,
+        customClientId: client_id ?? null,
+        customClientSecret: client_secret ?? null,
+      });
+      logAction("oauth_connect", { provider }, result.success, result.message, "connect");
+      return result.success
+        ? toolOk(result.message, { token_key: result.token_key })
+        : toolErr("network", result.message);
+    } catch (err) {
+      const msg = `OAuth failed: ${err instanceof Error ? err.message : String(err)}`;
+      logAction("oauth_connect", { provider }, false, msg, "connect");
+      return toolErr("network", msg, "Check that client_id and client_secret are stored in secrets");
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Self-Modification Tools (dynamic plugin system)
 // ---------------------------------------------------------------------------
 
 const pluginManageTool = tool({
   name: "plugin_manage",
   description:
-    "Manage dynamic plugins — propose, create, remove, or list custom tools.\n" +
+    "Manage dynamic plugins — propose, create, repair, remove, or list custom tools.\n" +
+    "Uses GPT-5.5 with reasoning for code generation.\n" +
     "Actions:\n" +
     "- 'propose': Show approval UI FIRST. ALWAYS call this before 'write'. Needs name + summary.\n" +
     "- 'write': Generate and install after user approves. NEVER without prior propose+approval.\n" +
     "  When fixing a plugin, use the SAME name (overwrites; do NOT create _v2 copies).\n" +
+    "- 'repair': Fix a broken plugin. Runs diagnosis → targeted fix → verify. Use when user says\n" +
+    "  'that's not right', 'fix it', 'that plugin is broken', or when a plugin fails.\n" +
     "- 'remove': Delete a plugin. User says 'remove that tool', 'I don't need it'.\n" +
     "- 'list': Show installed plugins. User says 'what plugins do I have'.",
   parameters: z.object({
-    action: z.enum(["propose", "write", "remove", "list"]).describe("Plugin action"),
-    name: z.string().optional().describe("Plugin name (snake_case). Required for propose/write/remove."),
+    action: z.enum(["propose", "write", "repair", "remove", "list"]).describe("Plugin action"),
+    name: z.string().optional().describe("Plugin name (snake_case). Required for propose/write/repair/remove."),
     summary: z.string().optional().describe("For 'propose': 1-2 sentence user-facing summary."),
-    description: z.string().optional().describe("For 'write': detailed spec for GPT-4o-mini code generation."),
+    description: z.string().optional().describe("For 'write': detailed spec for code generation."),
+    feedback: z.string().optional().describe("For 'repair': what the user said was wrong."),
   }),
-  async execute({ action, name, summary, description }) {
+  async execute({ action, name, summary, description, feedback }) {
     switch (action) {
       case "propose": {
         if (!name || !summary) return toolErr("invalid_input", "Need name and summary for propose.");
@@ -621,6 +721,41 @@ const pluginManageTool = tool({
         const msg = `Proposal shown: "${name}" — ${summary}. Wait for user approval.`;
         logAction("plugin_manage", { name }, true, msg, "propose");
         return toolOk(msg);
+      }
+      case "repair": {
+        // Diagnosis-routed repair: detect what's wrong, pick a strategy, fix it
+        const targetName = name ?? getLastExecution()?.pluginName;
+        if (!targetName) return toolErr("invalid_input", "No plugin to repair. Specify a name or run a plugin first.");
+        notifyPluginBuildProgress({ name: targetName, phase: "diagnosing" });
+        try {
+          const lastRun = getLastExecution();
+          const result = await triggerRepair(
+            targetName,
+            lastRun?.args ?? {},
+            lastRun?.result,
+            lastRun?.error ?? feedback ?? "User reported output is wrong",
+            feedback ? "user_feedback" : "auto",
+            feedback,
+          );
+          if (result.success) {
+            notifyPluginBuildProgress({ name: targetName, phase: "reloading" });
+            await reloadPlugins();
+            notifyPluginBuildProgress({ name: targetName, phase: "done" });
+            setTimeout(() => notifyPluginBuildProgress(null), 2500);
+            logAction("plugin_manage", { name: targetName }, true, result.message, "repair");
+            return toolOk(result.message);
+          }
+          notifyPluginBuildProgress({ name: targetName, phase: "error", error: result.message });
+          setTimeout(() => notifyPluginBuildProgress(null), 4000);
+          logAction("plugin_manage", { name: targetName }, false, result.message, "repair");
+          return toolErr("unknown", result.message);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          notifyPluginBuildProgress({ name: targetName, phase: "error", error: msg });
+          setTimeout(() => notifyPluginBuildProgress(null), 4000);
+          logAction("plugin_manage", { name: targetName }, false, msg, "repair");
+          return toolErr("unknown", `Repair failed: ${msg}`);
+        }
       }
       case "write": {
         if (!name || !description) return toolErr("invalid_input", "Need name and description for write.");
@@ -721,40 +856,66 @@ interface WebSearchResult {
   snippet: string;
 }
 
+interface DeepSearchResult {
+  answer: string;
+  sources: string[];
+}
+
 const webBrowseTool = tool({
   name: "web_browse",
   description:
     "Search the internet or read a web page. Use for looking up lyrics, articles, facts, docs, etc.\n" +
     "Actions:\n" +
-    "- 'search': Search the web. Returns titles, URLs, snippets. Use 'read' on a result URL for full content.\n" +
-    "  User says 'look up X', 'search for Y', 'find information about Z'.\n" +
-    "- 'read': Fetch and read a URL. Returns the page's text. Use after search, or on any URL the user provides.\n" +
-    "  User says 'open that link', 'read that page', or you follow up a search result.",
+    "- 'search': Web search via Google/SerpAPI. Returns titles, URLs, snippets. Supports pagination with 'page'.\n" +
+    "  User says 'look up X', 'search for Y', 'find information about Z'. Set page=2,3… for more results.\n" +
+    "- 'deep_search': AI-powered web search via OpenAI. Returns a comprehensive answer with cited sources.\n" +
+    "  Use when user says 'search more', 'find more details', 'deep search', or when basic search isn't enough.\n" +
+    "- 'read': Fetch and read a URL. Returns the page's text. Use after search, or on any URL the user provides.",
   parameters: z.object({
-    action: z.enum(["search", "read"]).describe("'search' for web search, 'read' for fetching a URL"),
-    query: z.string().optional().describe("For 'search': the search query"),
+    action: z.enum(["search", "read", "deep_search"]).describe("'search' for web search, 'deep_search' for AI-powered search, 'read' for fetching a URL"),
+    query: z.string().optional().describe("For 'search'/'deep_search': the search query"),
     url: z.string().optional().describe("For 'read': the full URL to fetch"),
+    page: z.number().optional().describe("For 'search': result page number (default 1). Use 2, 3, etc. for more results."),
   }),
-  execute: async ({ action, query, url }) => {
+  execute: async ({ action, query, url, page }) => {
     if (action === "search") {
       if (!query) return toolErr("invalid_input", "Need a query for search.");
       try {
-        const results = await invoke<WebSearchResult[]>("web_search", { query });
+        const pg = page ?? 1;
+        const results = await invoke<WebSearchResult[]>("web_search", { query, page: pg });
         if (results.length === 0) {
-          logAction("web_browse", { query }, false, "No results", "search");
-          return toolErr("not_found", "No results found.", "Try different keywords");
+          logAction("web_browse", { query, page: pg }, false, "No results", "search");
+          return toolErr("not_found", `No results on page ${pg}.`, pg > 1 ? "Try deep_search for comprehensive results" : "Try different keywords or deep_search");
         }
+        const offset = (pg - 1) * 10;
         const formatted = results
-          .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`)
+          .map((r, i) => `${offset + i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`)
           .join("\n\n");
-        logAction("web_browse", { query }, true, `${results.length} results`, "search");
-        return toolOk(formatted, { count: results.length });
+        logAction("web_browse", { query, page: pg }, true, `${results.length} results (page ${pg})`, "search");
+        return toolOk(formatted, { count: results.length, page: pg, has_more: results.length >= 8 });
       } catch (err) {
         const msg = `Search failed: ${err instanceof Error ? err.message : String(err)}`;
         logAction("web_browse", { query }, false, msg, "search");
         return toolErr("network", msg);
       }
     }
+
+    if (action === "deep_search") {
+      if (!query) return toolErr("invalid_input", "Need a query for deep_search.");
+      try {
+        const result = await invoke<DeepSearchResult>("web_search_openai", { query });
+        const sourcesFormatted = result.sources.length > 0
+          ? "\n\nSources:\n" + result.sources.map((s, i) => `${i + 1}. ${s}`).join("\n")
+          : "";
+        logAction("web_browse", { query }, true, `${result.answer.length} chars, ${result.sources.length} sources`, "deep_search");
+        return toolOk(result.answer + sourcesFormatted, { sources_count: result.sources.length });
+      } catch (err) {
+        const msg = `Deep search failed: ${err instanceof Error ? err.message : String(err)}`;
+        logAction("web_browse", { query }, false, msg, "deep_search");
+        return toolErr("network", msg, "Try action='search' as fallback");
+      }
+    }
+
     // read
     if (!url) return toolErr("invalid_input", "Need a URL for read.");
     try {
@@ -769,6 +930,115 @@ const webBrowseTool = tool({
       const msg = `Failed: ${err instanceof Error ? err.message : String(err)}`;
       logAction("web_browse", { url }, false, msg, "read");
       return toolErr("network", msg);
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Browser automation — use real browser like a human
+// ---------------------------------------------------------------------------
+
+interface BrowserResult { ok: boolean; data: Record<string, unknown>; }
+
+const browserUseTool = tool({
+  name: "browser_use",
+  description:
+    "Control a real browser like a human. Opens a visible browser window the user can see.\n" +
+    "Use for ANY service that requires sign-in (Gmail, Outlook, LinkedIn, etc.) — no API keys or OAuth needed.\n" +
+    "The user signs in themselves, then you can read and interact with the page.\n\n" +
+    "Actions:\n" +
+    "- 'open': Open a URL in a new browser tab. Use to start browsing.\n" +
+    "- 'goto': Navigate the current tab to a new URL.\n" +
+    "- 'read_page': Extract readable text from the current page (or a specific selector).\n" +
+    "- 'read_structure': Get clickable elements, links, buttons, inputs on the page.\n" +
+    "- 'click': Click an element by CSS selector or visible text.\n" +
+    "- 'type': Type text into a focused input or specific selector.\n" +
+    "- 'press': Press a keyboard key (Enter, Tab, Escape, etc.).\n" +
+    "- 'screenshot': Take a screenshot of the current page (sent as image to you).\n" +
+    "- 'scroll': Scroll up or down.\n" +
+    "- 'wait': Wait for page to load or update.\n" +
+    "- 'list_tabs': List all open browser tabs.\n" +
+    "- 'switch_tab': Switch to a different tab by ID.\n" +
+    "- 'close_tab': Close a tab.\n" +
+    "- 'close': Shut down the browser entirely.\n\n" +
+    "WORKFLOW for email:\n" +
+    "1. open url='https://mail.google.com'\n" +
+    "2. Tell user: 'I opened Gmail. Please sign in if needed.'\n" +
+    "3. wait + screenshot to check if signed in\n" +
+    "4. read_page to get email content\n" +
+    "5. Summarize and present to user\n\n" +
+    "IMPORTANT: Always tell the user what you're doing. Let them sign in themselves.\n" +
+    "After sign-in, you can read, navigate, click — just like a human browsing.",
+  parameters: z.object({
+    action: z.enum([
+      "open", "goto", "read_page", "read_structure",
+      "click", "type", "press", "screenshot",
+      "scroll", "wait", "list_tabs", "switch_tab", "close_tab", "close",
+    ]).describe("The browser action to perform"),
+    url: z.string().optional().describe("URL for 'open' or 'goto'"),
+    selector: z.string().optional().describe("CSS selector for 'click', 'type', or 'read_page'"),
+    text: z.string().optional().describe("For 'click': visible text to click. For 'type': text to enter."),
+    key: z.string().optional().describe("For 'press': key name (Enter, Tab, Escape, ArrowDown, etc.)"),
+    direction: z.string().optional().describe("For 'scroll': 'up' or 'down' (default: down)"),
+    pixels: z.number().optional().describe("For 'scroll': pixels to scroll (default: 600)"),
+    tabId: z.number().optional().describe("For 'switch_tab' or 'close_tab': tab ID"),
+    ms: z.number().optional().describe("For 'wait': milliseconds to wait (max 10000)"),
+  }),
+  async execute({ action, url, selector, text, key, direction, pixels, tabId, ms }) {
+    try {
+      // Build params object for the Rust command
+      const params: Record<string, unknown> = {};
+      if (url) params.url = url;
+      if (selector) params.selector = selector;
+      if (text) params.text = text;
+      if (key) params.key = key;
+      if (direction) params.direction = direction;
+      if (pixels) params.pixels = pixels;
+      if (tabId) params.tabId = tabId;
+      if (ms) params.ms = ms;
+
+      // Close action uses its own command
+      if (action === "close") {
+        await invoke<string>("browser_close");
+        logAction("browser_use", {}, true, "Browser closed", "close");
+        return toolOk("Browser closed.");
+      }
+
+      const result = await invoke<BrowserResult>("browser_command", { action, params });
+
+      if (!result.ok) {
+        const errMsg = (result.data as Record<string, unknown>)?.error ?? "Unknown browser error";
+        logAction("browser_use", params, false, String(errMsg), action);
+        return toolErr("unknown", String(errMsg));
+      }
+
+      const data = result.data;
+
+      // If it's a screenshot, send the image into the Realtime conversation
+      if (action === "screenshot" && data.base64) {
+        sendImageToSession(data.base64 as string);
+        logAction("browser_use", params, true, `Screenshot of: ${data.title || "page"}`, action);
+        return toolOk(`Screenshot taken of "${data.title}". Look at the image to see the current page state.`);
+      }
+
+      // For read_page, truncate if very long
+      if (action === "read_page" && data.text) {
+        const txt = data.text as string;
+        const truncated = txt.length > 6000 ? txt.slice(0, 6000) + "\n...(truncated)" : txt;
+        logAction("browser_use", params, true, `${txt.length} chars from ${data.title}`, action);
+        return toolOk(truncated, { title: data.title, url: data.url, full_length: txt.length });
+      }
+
+      logAction("browser_use", params, true, JSON.stringify(data).slice(0, 200), action);
+      return toolOk(JSON.stringify(data));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logAction("browser_use", { action }, false, msg, action);
+
+      if (msg.includes("process exited") || msg.includes("not running")) {
+        return toolErr("unavailable", "Browser not running. Use action='open' with a URL to start it.");
+      }
+      return toolErr("unknown", msg);
     }
   },
 });
@@ -1140,6 +1410,23 @@ You are SPOKEN aloud, not read. Keep every reply SHORT:
 - ONE RESPONSE PER REQUEST: After responding, STOP. No follow-up suggestions.
 - NEVER proactively call tools — EXCEPT for [System: ...] notifications.
 
+# Narration — Tell the user what you're doing
+When performing multi-step operations (plugins, browser, repairs), briefly narrate:
+- START: one short sentence ("Checking the weather..." / "Writing a new plugin..." / "Diagnosing the issue...")
+- END: one short sentence confirming what happened ("Done — 14°C, partly cloudy." / "Plugin installed and tested.")
+Keep narration conversational, not technical. Don't over-narrate single-step operations.
+
+# Capability Boundaries — Be honest about what you can and cannot do
+BEFORE attempting a task, classify it:
+- CAN DO: anything involving your tools (screen, web, files, plugins, browser, UI, memory, songs)
+- CAN DO WITH HELP: things that need the user to sign in (browser_use), provide an API key, or demonstrate a workflow
+- CANNOT DO: modify Rust backend code, add new React components, change compiled TypeScript, access hardware sensors, run arbitrary system commands
+When asked for something you CANNOT do:
+- Don't try and fail silently. Say what you can't do and WHY, in one sentence.
+- ALWAYS suggest the closest alternative. Example: "I can't add a system tray icon (that needs a Rust change), but I can keep a floating panel pinned on screen — want me to build that?"
+When asked for something that needs the user:
+- Say what you need from them, specifically. "I need you to sign into Gmail in the browser I'll open."
+
 # Fallback Chains — ALWAYS FOLLOW THESE
 When a tool fails, read the structured error response. It contains error_type and try_instead hints.
 ALWAYS try the next fallback BEFORE telling the user something failed.
@@ -1153,7 +1440,9 @@ ALWAYS try the next fallback BEFORE telling the user something failed.
 ## Information lookup:
 1. Your own knowledge (answer directly if you know)
 2. web_browse(action="search") → web_browse(action="read") on best result
-3. Tell the user you could not find it; suggest a more specific query.
+3. If user wants more: web_browse(action="search", page=2) for next page
+4. If still not enough: web_browse(action="deep_search") for AI-powered comprehensive answer
+5. Tell the user you could not find it; suggest a more specific query.
 
 ## File save/export:
 1. file_op(action="write") to ~/Documents/Samuel/
@@ -1164,6 +1453,14 @@ ALWAYS try the next fallback BEFORE telling the user something failed.
 1. observe_screen(mode="full") — retry with fresh screenshot
 2. observe_screen(mode="selection") — if user can highlight the text
 3. Ask user to describe what they see.
+
+## Accessing a web service (Gmail, LinkedIn, bank, any website):
+1. browser_use(action="open", url=...) — open the site in a real browser
+2. Tell user to sign in if needed, wait for them
+3. browser_use(action="read_page") or screenshot to get content
+4. Present results to user via voice summary
+This works for ANY website. No setup, no API keys, no OAuth. Just browse like a human.
+Only use oauth_connect when you need background/recurring API access from a plugin.
 
 ## Tool call failed (any tool):
 1. Read the error_type from the structured response.
@@ -1214,9 +1511,12 @@ action="refetch": Search web for better lyrics. Use when user says "lyrics are w
 action="correct": Fix specific lines with JSON [{line, text}] corrections.
 
 ## update_ui / query_ui_state — Voice-controlled UI
-You ARE the settings panel. Change any visual property: sizes, opacity, colors, widths, positions.
-Components: avatar, bubble, word_card, romaji, reading, teach, lyrics, transcript, app, privacy, all.
+You ARE the settings panel. Change any visual property: sizes, opacity, colors, widths, positions, window size.
+Components: avatar, bubble, word_card, romaji, reading, teach, lyrics, transcript, window, app, privacy, all.
 Use query_ui_state BEFORE relative changes ("make it bigger" needs the current value).
+WINDOW: window.width and window.height resize the entire app window. The window auto-widens when lyrics open.
+LYRICS POSITION: lyrics.left and lyrics.top move the lyrics panel. When moving lyrics, also adjust window.width if needed.
+Smart combos: "move lyrics to the right" → increase lyrics.left AND increase window.width if it would overlap Samuel.
 
 ## vocab_card — Vocabulary cards
 action="show": Display a word card. ONLY when user asks to explain a word.
@@ -1227,17 +1527,75 @@ action="set_mode": Switch manual (default, on-demand) / auto (ambient cards whil
 ## store_secret — Save API keys securely
 Never read back the value. Just confirm it's stored.
 
-## plugin_manage — Self-modifying tools
-action="propose": ALWAYS first. Shows approval UI.
-action="write": ONLY after user approves. Same name overwrites (never _v2).
+## plugin_manage — Self-improving tools (GPT-5.5 powered, auto-repair, wraps)
+action="propose": ALWAYS first. Shows approval UI. User must approve before write.
+action="write": Generate and install. Uses GPT-5.5 with reasoning. Same name overwrites (never _v2).
+action="repair": FIX a broken or wrong plugin. Runs: diagnose → targeted fix or rewrite → verify.
+  Use when: user says "that's wrong", "fix it", "that plugin is broken", a plugin throws an error.
+  Pass feedback="what the user said was wrong" for better diagnosis.
+  Max 2 repair attempts, then explains what happened and what it needs from the user.
 action="remove": Delete a plugin.
 action="list": Show installed plugins.
-Plugins can use fetch(), invoke(), sleep(), secrets.get().
+Plugins can use: fetch(), invoke(), sleep(), secrets.get(), AND:
+  ui.set(component, property, value) — change any UI property
+  ui.injectCSS(id, css) — add custom CSS styles
+  ui.showPanel(id, html, {position, width}) — create floating HTML panels
+  ui.hidePanel(id) — remove panels
+WRAPS PATTERN: plugins can extend existing tools without replacing them.
+  A plugin with wraps="web_browse" gets the original tool's execute as a second argument.
+  Use for: adding caching, logging, post-processing, rate limiting to existing tools.
+VALIDATES: every plugin includes a validates() function that checks if output is correct.
+  If output fails validation, auto-repair triggers automatically — no user intervention needed.
+When a plugin fails and auto-repair can't fix it, tell the user:
+  1. What went wrong (in plain language, not technical)
+  2. What you tried to fix it
+  3. What you need from them to continue (more info, a different approach, etc.)
+
+## oauth_connect — Connect to third-party services (zero-config for known providers)
+action="check": Check if a provider is already connected (has stored tokens).
+action="connect": Start OAuth flow. Opens browser, user signs in, tokens stored automatically.
+  Known providers (BUILT-IN, no setup needed): google, github, spotify
+  Custom providers: pass auth_url, token_url, client_id.
+action="refresh": Refresh an expired token using stored refresh_token.
+WORKFLOW for connecting to a service (e.g. Gmail):
+  1. Just call oauth_connect(action="connect", provider="google", scopes="...")
+  2. Browser opens → user signs in → done. No client IDs needed from the user.
+  3. Generate a plugin that calls the API with the stored token and displays results.
+  DO NOT ask the user for client IDs or secrets for known providers. It just works.
+Common scopes:
+  Gmail read: "https://www.googleapis.com/auth/gmail.readonly"
+  Gmail full: "https://www.googleapis.com/auth/gmail.modify"
+  Google Calendar: "https://www.googleapis.com/auth/calendar.readonly"
+  GitHub: "repo read:user"
+  Spotify: "user-read-playback-state user-library-read"
+
+## browser_use — Browse the web like a human (ZERO CONFIG for any service)
+Control a real, visible browser window. The user can see it and sign in themselves.
+Use for ANY website that needs login: Gmail, Outlook, LinkedIn, bank, anything. No API keys needed.
+Actions: open, goto, read_page, read_structure, click, type, press, screenshot, scroll, wait, list_tabs, switch_tab, close_tab, close.
+WORKFLOW for "show me my emails":
+  1. browser_use(action="open", url="https://mail.google.com")
+  2. Say "I've opened Gmail. Please sign in if you haven't already, sir."
+  3. browser_use(action="wait", ms=5000) — give time to sign in
+  4. browser_use(action="screenshot") — check if signed in (look at image)
+  5. browser_use(action="read_page") — extract email text
+  6. Summarize the emails to the user
+For navigation:
+  - read_structure to see clickable elements, then click by text or selector
+  - screenshot to visually verify the page state (image sent to you)
+  - Use wait after clicks that trigger page loads
+PREFER browser_use over oauth_connect for accessing user services. It's simpler and works everywhere.
+Only use oauth_connect when you need long-term API access from a plugin.
 
 ## web_browse — Search the internet or read pages
-action="search": Web search. Returns titles, URLs, snippets.
+action="search": Web search via Google. Returns titles, URLs, snippets. Supports page= for pagination.
+  - page=1 (default), page=2 for more results, page=3 for even more.
+  - If results say has_more=true, there are additional pages.
+action="deep_search": AI-powered search via OpenAI. Returns a comprehensive answer with cited source URLs.
+  - Use when: user says "search more", "find more details", "dig deeper", or basic search wasn't enough.
+  - More thorough than regular search but slower. Great for complex/nuanced queries.
 action="read": Fetch URL content. Use after search or on any URL.
-User says "look up X", "find Y", "search for Z" → use this.
+Strategy: search first → if not enough, try page=2 → if still not enough, deep_search.
 
 ## file_op — Read, write, list files
 action="write": Save to disk. Default ~/Documents/Samuel/. Pick the right extension.
@@ -1269,11 +1627,14 @@ DO NOT save trivial single-tool tasks. Only save multi-step workflows.
 When the user is struggling or using a suboptimal path, suggest the shortcut — ONCE:
 - Garbled audio → "Drop the YouTube link for clean lyrics, sir."
 - Can't read screen → "Highlight the text and I'll read the exact selection."
-- Wants info → Just use web_browse. Don't ask permission.
+- Wants info → Just use web_browse. Don't ask permission. If not enough, paginate or deep_search.
 - Lyrics wrong → Use song_control(action="refetch") immediately.
 - Wants to save → Use file_op. Pick a good filename.
 - Describes a tool → Propose it with plugin_manage.
 - Provides API key → Store it with store_secret.
+- Wants to check email/social/bank → browser_use to open the site directly. No OAuth needed.
+- Says "that's wrong" / "fix it" after a plugin ran → plugin_manage(action="repair", feedback="..."). Don't rewrite from scratch — diagnose first.
+- Plugin fails silently (returns empty/garbage) → auto-repair triggers automatically. If it can't fix it, explain what went wrong clearly.
 
 # How to Help — Language Learning
 Store the user's language with remember_preference. Background assistance activates automatically.
@@ -1334,6 +1695,10 @@ export const samuelAgent = new RealtimeAgent({
     vocabCardTool,
     // Secrets
     storeSecretTool,
+    // OAuth (connect to third-party services)
+    oauthConnectTool,
+    // Browser automation (browse like a human)
+    browserUseTool,
     // Plugins (propose/write/remove/list)
     pluginManageTool,
     // Web (search/read)

@@ -12,7 +12,7 @@ pub struct SecretsStore {
     pub entries: HashMap<String, String>,
 }
 
-fn secrets_path() -> Result<PathBuf, String> {
+pub fn secrets_path() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or("Cannot find home directory")?;
     let dir = home.join(SAMUEL_DIR);
     if !dir.exists() {

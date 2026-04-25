@@ -309,28 +309,37 @@ export default function App() {
     disconnect();
   }, [disconnect, setWakeWordMode, extractFeedback]);
 
-  // Auto-resize window height to fit content
+  // Auto-resize window; respect user-set width/height prefs; widen for lyrics
+  const lyricsActive = lyricsViewOpen && !!songLines;
   const containerRef = useRef<HTMLDivElement>(null);
+  const userW = (ui.prefs["window.width"] as number) ?? 520;
+  const userH = (ui.prefs["window.height"] as number) ?? 740;
+  const lyricsWidth = (ui.prefs["lyrics.width"] as number) ?? 185;
+
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const win = getCurrentWindow();
     const MIN_H = 400;
-    const MAX_H = 900;
+    const MAX_H = Math.max(userH, 900);
     let lastH = 0;
+    // When lyrics are open, ensure window is wide enough for lyrics + avatar
+    const minForLyrics = lyricsWidth + 350;
+    const targetW = lyricsActive ? Math.max(userW, minForLyrics) : userW;
     const observer = new ResizeObserver(() => {
       const needed = Math.min(MAX_H, Math.max(MIN_H, el.scrollHeight + 20));
       if (Math.abs(needed - lastH) > 10) {
         lastH = needed;
-        win.setSize(new LogicalSize(520, needed));
+        win.setSize(new LogicalSize(targetW, needed));
       }
     });
     observer.observe(el);
+    win.setSize(new LogicalSize(targetW, Math.min(MAX_H, Math.max(MIN_H, el.scrollHeight + 20))));
     return () => observer.disconnect();
-  }, []);
+  }, [lyricsActive, userW, userH, lyricsWidth]);
 
   return (
-    <div ref={containerRef} className="flex h-screen flex-col" style={ui.cssVars as React.CSSProperties}>
+    <div ref={containerRef} className={`flex h-screen flex-col ${lyricsActive ? "lyrics-active" : ""}`} style={ui.cssVars as React.CSSProperties}>
       {/* Compact header — draggable region for borderless window */}
       <div data-tauri-drag-region className="flex items-center justify-between px-5 py-2">
         <StatusBar

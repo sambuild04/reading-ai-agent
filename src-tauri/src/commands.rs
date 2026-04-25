@@ -1934,31 +1934,32 @@ pub struct SearchResult {
 }
 
 /// Search the web via SerpAPI (Google) with Brave HTML fallback.
+/// `page` is 1-based; SerpAPI uses `start` offset (0, 10, 20…).
 #[tauri::command]
-pub async fn web_search(query: String) -> Result<Vec<SearchResult>, String> {
-    eprintln!("[web] searching: {query}");
+pub async fn web_search(query: String, page: Option<u32>) -> Result<Vec<SearchResult>, String> {
+    let pg = page.unwrap_or(1).max(1);
+    eprintln!("[web] searching: {query} (page {pg})");
 
-    // Try SerpAPI first (requires SERPAPI_KEY in secrets store)
     let secrets = crate::secrets::load_secrets();
     if let Some(api_key) = secrets.entries.get("SERPAPI_KEY") {
-        let results = search_serpapi(&query, api_key)?;
+        let results = search_serpapi(&query, api_key, pg)?;
         if !results.is_empty() {
-            eprintln!("[web] serpapi: {} results", results.len());
+            eprintln!("[web] serpapi: {} results (page {pg})", results.len());
             return Ok(results);
         }
         eprintln!("[web] serpapi returned 0 results, falling back to Brave");
     }
 
-    // Fallback: Brave Search HTML scraping
     let results = search_brave(&query)?;
     eprintln!("[web] brave: {} results", results.len());
     Ok(results)
 }
 
-fn search_serpapi(query: &str, api_key: &str) -> Result<Vec<SearchResult>, String> {
+fn search_serpapi(query: &str, api_key: &str, page: u32) -> Result<Vec<SearchResult>, String> {
     let encoded = urlencoding(query);
+    let start = (page - 1) * 10;
     let url = format!(
-        "https://serpapi.com/search.json?q={encoded}&api_key={api_key}&engine=google&num=8"
+        "https://serpapi.com/search.json?q={encoded}&api_key={api_key}&engine=google&num=10&start={start}"
     );
 
     let out = Command::new("/usr/bin/curl")
@@ -2069,6 +2070,92 @@ fn html_entity_decode(s: &str) -> String {
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
         .replace("&#x27;", "'")
+}
+
+/// Use OpenAI Responses API with the `web_search` tool for an AI-powered deep search.
+/// Returns the model's answer text plus cited source URLs.
+#[derive(Serialize)]
+pub struct DeepSearchResult {
+    pub answer: String,
+    pub sources: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn web_search_openai(query: String) -> Result<DeepSearchResult, String> {
+    eprintln!("[web] openai deep search: {query}");
+    let config = read_config_internal()?;
+    let api_key = config.api_key.ok_or("No OpenAI API key configured")?;
+
+    let body = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "tools": [{ "type": "web_search" }],
+        "input": query,
+    });
+
+    let body_str = serde_json::to_string(&body).map_err(|e| format!("json: {e}"))?;
+    let auth = format!("Authorization: Bearer {api_key}");
+
+    let out = Command::new("/usr/bin/curl")
+        .args([
+            "-s", "--max-time", "30", "-L",
+            "-H", "Content-Type: application/json",
+            "-H", &auth,
+            "-d", &body_str,
+            "https://api.openai.com/v1/responses",
+        ])
+        .output()
+        .map_err(|e| format!("curl: {e}"))?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("OpenAI web search request failed: {stderr}"));
+    }
+
+    let resp_body = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(&resp_body)
+        .map_err(|e| format!("OpenAI response parse: {e}"))?;
+
+    if let Some(err) = json.get("error") {
+        let msg = err.get("message").and_then(|v| v.as_str()).unwrap_or("unknown error");
+        return Err(format!("OpenAI API error: {msg}"));
+    }
+
+    let mut answer = String::new();
+    let mut sources: Vec<String> = Vec::new();
+
+    if let Some(output) = json.get("output").and_then(|v| v.as_array()) {
+        for item in output {
+            let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+            if item_type == "message" {
+                if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
+                    for block in content {
+                        if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                            answer.push_str(text);
+                        }
+                        if let Some(annotations) = block.get("annotations").and_then(|v| v.as_array()) {
+                            for ann in annotations {
+                                if ann.get("type").and_then(|v| v.as_str()) == Some("url_citation") {
+                                    if let Some(url) = ann.get("url").and_then(|v| v.as_str()) {
+                                        if !sources.contains(&url.to_string()) {
+                                            sources.push(url.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if answer.is_empty() {
+        return Err("OpenAI web search returned no answer".into());
+    }
+
+    eprintln!("[web] openai deep search: {} chars, {} sources", answer.len(), sources.len());
+    Ok(DeepSearchResult { answer, sources })
 }
 
 /// Fetch a web page and return its readable text content.

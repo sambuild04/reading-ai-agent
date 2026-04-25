@@ -1,14 +1,18 @@
+mod browser;
 mod commands;
 mod flashcards;
 mod memory;
+mod oauth;
 mod plugins;
 mod secrets;
 mod teach;
 mod wake_word;
 
+use browser::*;
 use commands::*;
 use flashcards::*;
 use memory::*;
+use oauth::*;
 use plugins::*;
 use secrets::*;
 use teach::*;
@@ -90,18 +94,24 @@ pub fn run() {
             delete_plugin,
             generate_plugin_code,
             judge_plugin_code,
+            diagnose_plugin_failure,
             get_secret,
             set_secret,
             delete_secret,
             list_secrets,
             fetch_genius_lyrics,
             web_search,
+            web_search_openai,
             web_read,
             agent_write_file,
             agent_read_file,
             agent_list_directory,
             skill_list_summaries,
             skill_delete,
+            oauth_flow,
+            oauth_refresh,
+            browser_command,
+            browser_close,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

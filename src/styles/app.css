@@ -1815,6 +1815,12 @@ html, body, #root {
   line-height: 1.4;
 }
 
+/* When lyrics panel is open, push character stage right to avoid overlap */
+.lyrics-active .character-stage {
+  margin-left: calc(var(--lyrics-width, 185px) + 12px);
+  transition: margin-left 0.3s ease;
+}
+
 /* ── Lyrics HUD — floating holographic panel (non-blocking) ── */
 .lyrics-hud {
   position: fixed;

@@ -1,19 +1,19 @@
-# Screen Voice Agent — open-source desktop AI agent that watches your screen, listens to audio, and teaches languages by voice
+# Samuel — open-source voice AI agent that sees your screen, browses the web, writes its own tools, and fixes them when they break
 
-An always-on voice AI assistant for macOS that uses GPT-4o Vision to see your screen, OpenAI Realtime API for natural voice conversation, and writes its own tools at runtime. Built with Tauri v2, React, and TypeScript. MIT licensed.
+An always-on voice AI desktop assistant for macOS that watches your screen, listens to audio, browses the web like a human, generates its own plugins with GPT-5.5 reasoning, and auto-repairs them when they fail. Built with Tauri v2, React, TypeScript, and Playwright. MIT licensed.
 
-**Use cases:** ambient language learning (Japanese, Korean, Spanish), live meeting interpretation, real-time anime/video translation, hands-free desktop assistance, AI tutoring while watching content.
-
-Internally, the agent answers to **"Hey Samuel."**
+**Use cases:** ambient language learning, voice-controlled web browsing, self-building AI tools, hands-free desktop automation, live meeting interpretation, real-time video translation, AI tutoring, email/calendar access via browser automation.
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![macOS](https://img.shields.io/badge/platform-macOS-black.svg)
 ![Tauri v2](https://img.shields.io/badge/Tauri-v2-orange.svg)
 ![OpenAI Realtime API](https://img.shields.io/badge/OpenAI-Realtime%20Voice-412991.svg)
+![GPT-5.5](https://img.shields.io/badge/GPT--5.5-reasoning-10a37f.svg)
+![Playwright](https://img.shields.io/badge/Playwright-browser%20automation-2EAD33.svg)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2.svg)](https://github.com/sambuild04/screen-voice-agent/issues/new?title=Discord+invite+request)
 [![Contributors](https://img.shields.io/github/contributors/sambuild04/screen-voice-agent.svg)](https://github.com/sambuild04/screen-voice-agent/graphs/contributors)
 
-> **TL;DR:** Say "Hey Samuel" and talk. He sees your screen, hears your audio, remembers everything, and writes his own tools when he needs new capabilities.
+> **TL;DR:** Say "Hey Samuel" and talk. He sees your screen, hears your audio, browses the web for you, writes his own tools with GPT-5.5, auto-repairs them when they break, and remembers everything across sessions.
 
 ---
 
@@ -33,58 +33,109 @@ https://github.com/user-attachments/assets/338f8194-49e6-496d-b218-715af4afa1ee
 
 ## What Makes Samuel Different
 
-### Self-Modifying — Writes Its Own Tools at Runtime
+### Self-Improving AI — Writes, Tests, and Auto-Repairs Its Own Tools
 
-Most AI agents have a fixed tool set. Samuel doesn't.
+Most AI agents have a fixed tool set. Samuel doesn't. He generates new tools at runtime using **GPT-5.5 with reasoning tokens**, reviews them with GPT-4o-mini, and auto-repairs them when they break — with a max of 2 attempts before honestly telling you what went wrong.
 
 ```
-You:     "Hey Samuel, add a weather tool"
-Samuel:  "I'll create a tool that fetches weather from wttr.in. [Approve] [Reject]"
-You:     *clicks Approve*
-Samuel:  *generates code → writes to disk → hot-loads into live session*
-Samuel:  "Done. What's the weather in Tokyo?"
+You:     "Build me a weather widget"
+Samuel:  "I'll create a weather tool with a visual panel. [Approve] [Reject]"
+You:     *approves*
+Samuel:  "Generating with GPT-5.5..." → validates → installs → "Done. It's 14°C in Tokyo."
+
+         ...later, the API changes...
+
+Samuel:  *detects validation failure* → *diagnoses: external API change*
+         → *patches the endpoint* → *verifies* → "The weather API changed. I've fixed it."
 ```
 
-No rebuild. No restart. The new tool is live in the same voice conversation. If a plugin breaks, Samuel reads the error, proposes a fix, and rewrites it — with your approval.
+No rebuild. No restart. If the fix fails twice, Samuel explains what happened and what he needs from you — never loops silently.
+
+### Browser Automation — Access Any Website, Zero Config
+
+Samuel opens a **real, visible browser window** via Playwright. You sign in yourself — he reads and interacts with the page like a human. No API keys, no OAuth, no developer setup. Works with any website.
+
+```
+You:     "Show me my emails"
+Samuel:  "Opening Gmail now, sir." → *browser opens*
+         "Please sign in if needed." → *waits*
+         "You have 3 new emails. First is from Sarah about the project deadline..."
+
+You:     "Check my GitHub notifications"
+Samuel:  *opens GitHub* → *reads notification page* → summarizes
+```
+
+Gmail, Outlook, LinkedIn, your bank, internal tools — anything you can open in a browser, Samuel can read and interact with.
+
+### Plugin Auto-Repair Pipeline (GPT-5.5 Reasoning)
+
+When a plugin fails — whether it throws an error, returns wrong output, or you say "that's wrong" — Samuel runs a four-stage repair pipeline:
+
+| Stage | What happens |
+|---|---|
+| **Detect** | Runtime exception, `validates()` failure, or user feedback |
+| **Diagnose** | GPT-5.5 (high reasoning) categorizes: syntax bug, wrong API assumption, external change, structural issue |
+| **Repair** | Routes to targeted patch, full rewrite, ask user, or clean give-up based on diagnosis |
+| **Verify** | New code must parse and load before replacing the old version |
+
+Max 2 attempts. If it can't fix it, you get a plain-language explanation of what went wrong and what Samuel needs from you to continue.
+
+### Tool Wraps — Extend Existing Tools Without Replacing Them
+
+Plugins can wrap existing tools with a middleware pattern. A plugin with `wraps: "web_browse"` gets the original tool's function as a second argument — enabling caching, logging, rate limiting, or post-processing on any built-in tool.
 
 ### Procedural Memory — Learns and Reuses Workflows
 
-Samuel doesn't just execute tasks — he remembers how he did them. When he successfully chains multiple tools to solve a complex request, he saves the workflow as a reusable "skill."
+Samuel doesn't just execute tasks — he remembers how he did them. After successfully chaining 3+ tools, he saves the workflow as a reusable "skill."
 
 ```
 You:     "Compare the lyrics with the real ones online and fix any mistakes"
-Samuel:  *searches web → reads lyrics page → compares line by line → corrects 4 lines*
-Samuel:  "Done. I've also saved this as a skill so I can do it faster next time."
+Samuel:  *searches web → reads lyrics page → compares → corrects 4 lines*
+         "Done. I've saved this as a skill for next time."
 
          ...next session...
 
 You:     "The lyrics are wrong again"
-Samuel:  *loads saved skill → executes the same workflow in seconds*
+Samuel:  *loads saved skill → executes in seconds*
 ```
-
-Skills are stored as simple markdown files in `~/.samuel/skills/`. You can edit, share, or contribute them.
 
 ### Always Watching, Always Listening
 
-Samuel runs a continuous perception loop in the background:
+Samuel runs a continuous perception loop:
 
 - **Screen** — captures via GPT-4o Vision every 20s with smart change detection
 - **Audio** — transcribes system audio via ScreenCaptureKit with PID-level filtering (excludes his own voice)
-- **Context injection** — feeds observations silently into the conversation so he always knows what's happening
+- **Context injection** — feeds observations silently so he always knows what's happening
 
-Ask "what did they just say?" or "what's on my screen?" at any point — he already knows.
+### Capability Boundaries — Honest About What He Can and Cannot Do
+
+Samuel classifies every request before attempting it:
+
+- **CAN DO:** anything involving his tools (screen, web, browser, files, plugins, UI, memory, songs)
+- **NEEDS YOUR HELP:** sign into a website, provide an API key, demonstrate a workflow
+- **CANNOT DO:** modify compiled code, add native OS features, access hardware sensors
+
+When asked for something impossible, he suggests the closest alternative. When he needs something from you, he says specifically what. Never fails silently.
+
+### Execution Narration — Always Know What Samuel Is Doing
+
+During multi-step operations, Samuel narrates briefly:
+- *"Diagnosing the issue..."* → *"Fixed — the API endpoint had changed."*
+- *"Writing a new plugin..."* → *"Installed and tested. You have 12 stars."*
+- *"Opening your browser..."* → *"Got it. Want me to summarize?"*
+
+Conversational, not technical. You always know what's happening.
 
 ### Remembers Everything
 
-Three types of persistent local memory:
+Four types of persistent local memory:
 
 | Type | Example | Effect |
 |---|---|---|
 | **Preferences** | "Be more concise" | Applied every session |
 | **Corrections** | "That explanation was wrong" | Never repeated |
 | **Facts** | "I'm intermediate at Japanese" | Adjusts behavior permanently |
-
-Say "I already know that word" — permanently suppressed. Say "be more direct" — communication style changes from that session forward. All memory is local, auditable, and editable.
+| **Skills** | Multi-step workflows | Replayed instead of re-invented |
 
 ### Voice-Controlled Everything
 
@@ -93,129 +144,76 @@ Samuel is his own settings panel. No menus, no preferences screen:
 | You say | What happens |
 |---|---|
 | "Make yourself smaller" | Avatar shrinks |
-| "Make the font bigger" | Speech bubble text grows |
+| "Make the window wider" | App window resizes |
 | "Show me word cards while I watch" | Switches to auto vocab card mode |
-| "Cards every 20 seconds" | Adjusts card frequency |
-| "Only show cards when I ask" | Switches back to manual mode |
-| "Hide the romaji" | Annotations hidden |
-| "Move the lyrics panel to the right" | Lyrics panel repositions |
+| "Move the lyrics to the left" | Lyrics panel repositions + window auto-adjusts |
 | "Reset the UI" | All visual settings restored |
-
-Every UI element — sizes, opacity, colors, positions — is adjustable by voice through a single schema-driven system.
 
 ---
 
 ## Core Features
 
-### Recording Mode — Your AI Audience
+### Web Intelligence (3 Tiers)
 
-Record any audio (meetings, lectures, videos) and ask Samuel anything about the transcript:
+| Tier | When Samuel uses it | How it works |
+|---|---|---|
+| **Basic search** | "Look up X" | SerpAPI Google search with pagination |
+| **Deep search** | "Find more details" / "Dig deeper" | OpenAI Responses API with web_search — returns comprehensive answer with cited sources |
+| **Browser automation** | "Show me my Gmail" / any login-required site | Playwright opens real Chromium, you sign in, Samuel reads the page |
 
-```
-You:     "Hey Samuel, start recording"
-         *attends a meeting*
-You:     "Stop recording"
-Samuel:  "Transcript ready. What would you like me to do with it?"
-You:     "Summarize the key decisions"
-         or "Find anything about pricing"
-         or "Did anyone say something incorrect about our API?"
-         or "Break down the Japanese grammar"
-         or "What were the action items?"
-```
+### Recording Mode
 
-One recording. Any question. Samuel holds the full transcript and applies his reasoning to whatever you ask — no hardcoded analysis pipeline.
-
-### Web Browsing — Search and Read Like a Human
-
-Samuel can search the internet and read web pages on his own:
-
-```
-You:     "Search for the lyrics of 冷たく暗い by Aimer"
-Samuel:  *searches Google → finds lyrics page → reads it → shows lyrics in floating panel*
-
-You:     "Look up the N3 grammar point ～ようにする"
-Samuel:  *searches → reads a grammar explanation site → teaches you with examples*
-
-You:     "What's the weather API endpoint for wttr.in?"
-Samuel:  *searches → reads the docs → tells you*
-```
-
-Not limited to language learning — Samuel can find anything a human can Google. Lyrics, documentation, articles, definitions.
-
-### Multi-Step Reasoning — Chains Tools Automatically
-
-Samuel doesn't need explicit instructions for every workflow. Give him a complex request and he chains tools together:
-
-```
-You:     "Compare the lyrics with the real ones online and fix any mistakes"
-Samuel:  *web_search → web_read → compare → correct_lyrics* (4 tools, zero prompting)
-
-You:     "Find a recipe for tonkotsu ramen and save it to a file"
-Samuel:  *web_search → web_read → file_write* (automatic)
-```
-
-When any tool in the chain fails, Samuel follows built-in fallback chains — retrying with alternative approaches before ever telling you something didn't work.
+Record any audio (meetings, lectures, videos) and ask Samuel anything about the transcript. One recording, any question — summarize, find topics, break down grammar, extract action items.
 
 ### Song Teaching Mode
 
-Drop a YouTube link into the chat box and Samuel becomes a music tutor:
+Drop a YouTube link and Samuel becomes a music tutor:
 
-1. Downloads audio via `yt-dlp`, searches the internet for lyrics (LRCLIB + Genius, falls back to Whisper transcription)
-2. You say "play the first 3 lines" — original audio plays, mic auto-mutes
-3. Audio finishes → mic unmutes → Samuel explains the vocabulary and grammar
-4. Lyrics display in a floating HUD panel — tap any line to play that segment
-5. Fully conversational — ask "what does that word mean?", "play it again", "skip to the chorus"
-6. If lyrics are wrong, say "the lyrics are wrong" — Samuel searches the web for better ones, compares, and corrects automatically
+1. Downloads audio, searches for lyrics (LRCLIB + Genius + web search + Whisper fallback)
+2. "Play the first 3 lines" — original audio plays, mic auto-mutes
+3. Audio finishes → mic unmutes → Samuel explains vocabulary and grammar
+4. Lyrics display in floating HUD — tap any line to play that segment
+5. Wrong lyrics? Say "the lyrics are wrong" — Samuel searches the web, compares, and corrects automatically
 
 ### Chat Box — Drop Anything, Ask Anything
 
-Tap the chat icon below Samuel's avatar to type or paste content with your own question:
-
-- **Text + question** → paste `冷たく暗い 光を湛えた眼` and type "what is this?" → Samuel explains
-- **YouTube link** → song teaching mode with audio playback + lyrics
-- **Article URL** → extracts text, annotates vocabulary and grammar
+- **Text** → Samuel explains, translates, teaches
+- **YouTube link** → song teaching mode
+- **Article URL** → extracted and annotated
 - **Image / manga** → OCR + breakdown
-- **API key** → Samuel asks what it's for and stores it securely
-- **Any message** → just chat via text instead of voice
+- **API key** → securely stored
 
-### Privacy Controls
+### OAuth Integration (Zero-Config for Known Providers)
 
-Settings button (top-right corner) lets you directly toggle:
-- **Screen watching** — whether Samuel observes your screen for language hints
-- **Audio listening** — whether Samuel hears ambient audio for learning
-
-### Ambient Language Assistance
-
-Set your learning language once ("I'm learning Japanese") and Samuel assists in the background — forever:
-
-- **Manual mode** (default) — ask Samuel to explain any word; he shows a vocabulary card
-- **Auto mode** — say "show me cards while I watch" and Samuel periodically reviews what he hears/sees, picking out interesting words based on your proficiency level
-- **Cross-language hints** — say "tell me the Japanese for any English words you hear" and he does that too
-- **Frequency control** — "cards every 30 seconds" / "less often" / "stop auto cards"
-
-All driven by Samuel's own judgment, not rigid rules. He knows your level, what you've already learned, and what's worth highlighting.
+For API-level access, PKCE-based OAuth with built-in client IDs for Google, GitHub, and Spotify. User just clicks "Allow" — no Cloud Console setup. Power users can override with their own credentials.
 
 ### Scene Clip Flashcards
 
-When Samuel spots a word, a vocab card appears. Tap "Save it" — he saves the actual 20-second audio clip plus a screenshot. Flashcards aren't text — they're real scenes with the original voice actor's delivery.
+Vocab card appears → tap "Save it" → Samuel saves the 20-second audio clip plus screenshot. Flashcards are real scenes with the original voice actor's delivery.
+
+### Privacy Controls
+
+Toggle screen watching and audio listening directly from the settings button. All memory is local, auditable, and editable.
 
 ---
 
 ## Architecture
 
 ```
-"Hey Samuel" → Wake word → OpenAI Realtime API → 19 tools → Voice response
+"Hey Samuel" → Wake word → OpenAI Realtime API → 20+ tools → Voice response
                                     ↕
          Screen capture (GPT-4o Vision, change detection, every 20s)
          System audio (ScreenCaptureKit, PID-level filtering)
-         Ambient context → silent injection OR periodic Samuel review
-         Plugin system: propose → approve → generate → hot-load
-         Skill system: execute workflow → save as reusable skill → replay
+         Browser automation (Playwright, headed Chromium, visible to user)
+         Plugin system: propose → GPT-5.5 generate → review → validate → install
+         Auto-repair: detect failure → GPT-5.5 diagnose → route repair → verify
+         Wraps/middleware: plugins extend existing tools without replacing them
+         Skill system: execute workflow → save as skill → replay next time
+         OAuth: PKCE + built-in client IDs → zero-config for known providers
          Song playback: yt-dlp → local audio → HTML5 <audio> with seek
-         Recording: Whisper transcribe → raw transcript → user-directed analysis
+         Recording: Whisper transcribe → user-directed analysis
          Secrets store: ~/.samuel/secrets.json (local)
-         Personality memory: preferences + corrections + facts
-         Scene clip flashcards: audio + screenshot per word
+         Personality memory: preferences + corrections + facts + skills
 ```
 
 ### Models
@@ -223,33 +221,33 @@ When Samuel spots a word, a vocab card appears. Tap "Save it" — he saves the a
 | Model | Purpose | Latency |
 |---|---|---|
 | OpenAI Realtime API | Voice conversation, all interactive features | ~500ms |
+| GPT-5.5 (reasoning) | Plugin code generation, failure diagnosis | ~3-8s |
 | GPT-4o Vision | Screen scanning, ambient observation | ~3-5s |
-| GPT-4o-mini | Annotation, plugin code generation | ~1s |
+| GPT-4o-mini | Plugin code review, annotations | ~1s |
 | gpt-4o-transcribe | Recording transcription (high-fidelity) | ~3-10s |
 | whisper-1 | Song segmentation with timestamps | ~3-5s |
 
-### Key Tools Samuel Has
-
-All tools use structured error responses with fallback chains. Related tools are grouped to keep the tool count manageable for the model.
+### Key Tools
 
 | Tool | What it does |
 |---|---|
-| `observe_screen` | Captures and analyzes what's on screen (full screenshot or selected text) |
-| `recording` | Start/stop system audio capture + transcription |
-| `teach_from_content` | Analyzes any dropped content (YouTube, URLs, text, images) for learning |
-| `song_control` | Play, pause, show/hide lyrics, refetch lyrics from web, correct lines |
-| `vocab_card` | Show vocabulary cards, dismiss, switch manual/auto mode |
-| `update_ui` / `query_ui_state` | Voice-controlled UI — change any visual property by speaking |
-| `web_browse` | Search the internet and read web pages |
-| `file_op` | Read, write, and list files on disk |
-| `skill_manage` | Save, search, list, read, and delete reusable multi-step workflows |
-| `plugin_manage` | Self-modification — propose, write, remove, list dynamic plugins |
-| `store_secret` | Saves API keys securely for plugins |
-| `remember_preference` | Stores persistent user preferences and facts |
-| `record_correction` | Stores behavioral corrections |
-| `mark_vocabulary_known` | Permanently suppresses known words |
-| `get_recent_actions` | Recalls recent tool calls and outcomes for self-correction |
-| `pronounce` | Speaks correct pronunciation of words |
+| `observe_screen` | Captures and analyzes what's on screen |
+| `browser_use` | Opens real browser, navigates, reads, clicks, types, screenshots |
+| `web_browse` | Search the internet (3 tiers) and read web pages |
+| `plugin_manage` | Self-modification — propose, write, **repair**, remove, list plugins |
+| `skill_manage` | Save, search, and replay multi-step workflows |
+| `song_control` | Play, pause, lyrics, refetch, correct |
+| `recording` | Start/stop system audio capture |
+| `teach_from_content` | Analyze YouTube, URLs, text, images for learning |
+| `update_ui` | Voice-controlled UI changes |
+| `vocab_card` | Vocabulary cards (manual/auto mode) |
+| `oauth_connect` | Zero-config OAuth for Google/GitHub/Spotify |
+| `file_op` | Read, write, list files on disk |
+| `store_secret` | Secure API key storage |
+| `remember_preference` | Persistent user facts and preferences |
+| `record_correction` | Behavioral feedback storage |
+| `get_recent_actions` | Self-awareness — recall recent tool calls |
+| `pronounce` | Speak correct pronunciation |
 
 ---
 
@@ -261,11 +259,14 @@ All tools use structured error responses with fallback chains. Related tools are
 | Frontend | React 19 + Vite + TypeScript |
 | Voice | [OpenAI Realtime API](https://platform.openai.com/docs/guides/realtime) (WebRTC) |
 | Agent Framework | [@openai/agents](https://github.com/openai/openai-agents-js) |
+| Code Generation | GPT-5.5 with reasoning tokens via Responses API |
 | Vision | GPT-4o Vision |
-| Plugin Runtime | `new Function()` + secrets injection |
+| Browser Automation | [Playwright](https://playwright.dev) (headed Chromium) |
+| Plugin Runtime | `new Function()` + secrets + UI injection + validates + wraps |
+| OAuth | PKCE + built-in client IDs (Google, GitHub, Spotify) |
 | Song Audio | [yt-dlp](https://github.com/yt-dlp/yt-dlp) + HTML5 Audio |
 | Lyrics | [LRCLIB](https://lrclib.net) + [Genius](https://genius.com) + web search fallback |
-| Web Browsing | [SerpAPI](https://serpapi.com) (Google search) + Brave fallback + curl (page reading) |
+| Web Search | [SerpAPI](https://serpapi.com) (Google) + OpenAI deep search + Brave fallback |
 | Animation | [Rive](https://rive.app) |
 | Screen Capture | [Peekaboo](https://github.com/nicklama/peekaboo) + macOS `screencapture` |
 | Audio Capture | ScreenCaptureKit (Swift), PID-level filtering |
@@ -274,13 +275,13 @@ All tools use structured error responses with fallback chains. Related tools are
 
 ## Quick Start
 
-> **Heads up:** A one-click installer is on the way. For now, install requires building from source. If you want to be notified when the packaged release ships, star this repo or [open an issue](https://github.com/sambuild04/screen-voice-agent/issues/new?title=Notify+me+when+installer+is+ready) saying "notify me."
+> **Heads up:** A one-click installer is on the way. For now, install requires building from source. Star this repo or [open an issue](https://github.com/sambuild04/screen-voice-agent/issues/new?title=Notify+me+when+installer+is+ready) to be notified when the packaged release ships.
 
 ### Prerequisites
 
 - macOS 14+ (Sonoma or later)
 - Node.js 20+ and Rust ([rustup.rs](https://rustup.rs))
-- OpenAI API key with Realtime API + GPT-4o access
+- OpenAI API key with Realtime API + GPT-5.5 access
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) (`brew install yt-dlp`) for song features
 
 ### Install
@@ -290,6 +291,7 @@ brew install steipete/tap/peekaboo yt-dlp
 git clone https://github.com/sambuild04/screen-voice-agent.git
 cd screen-voice-agent
 npm install
+npx playwright install chromium
 swiftc -o src-tauri/helpers/record-audio src-tauri/helpers/record-audio.swift \
   -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia
 echo '{"apiKey": "sk-..."}' > ~/.samuel/config.json
@@ -303,7 +305,7 @@ npm run tauri:dev
 
 Say **"Hey Samuel"** and start talking.
 
-> Stuck on install? [Open an issue](https://github.com/sambuild04/screen-voice-agent/issues/new) or join the [Discord](https://github.com/sambuild04/screen-voice-agent/issues/new?title=Discord+invite+request) — we'll help you through it and improve the docs.
+> Stuck? [Open an issue](https://github.com/sambuild04/screen-voice-agent/issues/new) or join the [Discord](https://github.com/sambuild04/screen-voice-agent/issues/new?title=Discord+invite+request).
 
 ---
 
@@ -313,9 +315,11 @@ Say **"Hey Samuel"** and start talking.
 |---|---|
 | Wake word (always listening) | ~$0.006/min |
 | Ambient assistance (screen + audio) | ~$0.02-0.05/min |
-| Auto card mode (Samuel review) | ~$0.01/review cycle |
-| Plugin code generation | ~$0.001/plugin |
+| Plugin generation (GPT-5.5) | ~$0.005/plugin |
+| Plugin diagnosis (GPT-5.5) | ~$0.003/diagnosis |
+| Plugin review (GPT-4o-mini) | ~$0.001/review |
 | Voice conversation | Standard Realtime API pricing |
+| Browser automation | Free (runs locally) |
 
 ---
 
@@ -323,135 +327,107 @@ Say **"Hey Samuel"** and start talking.
 
 - **macOS only** — depends on ScreenCaptureKit, Peekaboo, and macOS APIs
 - **Plugins are not OS-sandboxed** — `new Function()` has full JS access; the approval flow is the current security boundary
-- **Dynamic plugins are JS only** — new native capabilities (Swift/Rust) still require a rebuild
-- **Lyrics coverage** — Genius provides accurate text for most songs; LRCLIB adds timestamps; web search and Whisper are fallbacks
+- **Cannot modify its own compiled code** — plugins can add new tools and wrap existing ones, but can't edit `samuel.ts` or Rust code at runtime
+- **Browser sessions don't persist** — each Playwright launch starts fresh; cookies/logins don't carry over yet
+- **Single-file plugins** — no multi-file plugin architecture or npm imports
 - **Always-on costs** — ambient mode runs continuously; costs accumulate while active
 
 ---
 
 ## Roadmap
 
-The vision: an AI that lives where you work, sees what you see, hears what you hear, and gets better at helping you over time. Things we're building toward:
+The vision: an AI that lives where you work, sees what you see, hears what you hear, writes its own tools, fixes its own bugs, and gets better at helping you every day.
 
 - **One-click installer** — packaged `.dmg`, no compilation. *(in progress)*
-- **MCP support** — connect to Notion, Gmail, Slack, GitHub, and any other MCP server.
-- **Plugin/skill marketplace** — share and install community-built tools and workflows.
-- **Persistent procedural memory** — Samuel remembers how he completed a workflow and reuses the approach next time. *(shipped)*
-- **General monitoring mode** — "watch this meeting and flag anything important" as a first-class feature.
-- **Local-first mode** — local Whisper + Ollama option, no API key required.
+- **Persistent browser sessions** — save cookies so you don't re-login every time.
+- **Plugin sandboxing** — run plugins in isolated Web Workers for security.
+- **Plugin chaining** — let plugins call each other and share state.
+- **Plugin marketplace** — share and install community-built tools and workflows.
+- **Demonstration learning** — "watch me do this once" → Samuel learns the workflow from screen recordings.
+- **MCP support** — connect to Notion, Gmail, Slack, GitHub, and any MCP server.
+- **General monitoring mode** — "watch this meeting and flag anything important."
+- **Local-first mode** — local Whisper + Ollama, no API key required.
 - **Cross-platform** — Windows and Linux ports.
-- **iOS / Android companion app** — pick up where you left off on the desktop.
-- **SRS scheduling** — spaced repetition on your saved scene flashcards.
-- **OS-level sandboxing for dynamic plugins.**
-- **Local on-device wake word** — zero API cost for "Hey Samuel."
+- **iOS / Android companion** — pick up where you left off.
+- **SRS scheduling** — spaced repetition on saved scene flashcards.
+- **Auto-healing plugins** — if a plugin fails in the background, auto-fix without interrupting the user. *(shipped — up to 2 attempts)*
 - **Anki export.**
-
-If any of these excite you, [open an issue](https://github.com/sambuild04/screen-voice-agent/issues/new) saying which one — we'll find a way to collaborate.
 
 ---
 
 ## How It Compares
 
-| Tool | Voice | Screen Vision | Audio Listening | Self-Modifying | Open Source |
+| Capability | **Samuel** | ChatGPT Voice | Granola | Cluely | Otter.ai |
 |---|---|---|---|---|---|
-| **Screen Voice Agent** | Yes | Yes | Yes | Yes | Yes (MIT) |
-| Granola | No | No | Yes | No | No |
-| Cluely | No | Yes | Yes | No | No |
-| Otter.ai | No | No | Yes | No | No |
-| ChatGPT Voice | Yes | Partial | No | No | No |
+| Voice conversation | Yes | Yes | No | No | No |
+| Screen vision | Yes | Partial | No | Yes | No |
+| Audio listening | Yes | No | Yes | Yes | Yes |
+| Web browsing (real browser) | Yes | No | No | No | No |
+| Self-modifying (writes tools) | Yes | No | No | No | No |
+| Auto-repairs its own tools | Yes | No | No | No | No |
+| Persistent memory | Yes | Limited | No | No | No |
+| Open source | Yes (MIT) | No | No | No | No |
 
 ---
 
 ## FAQ
 
-**What is this project?**
-Screen Voice Agent is an open-source macOS desktop AI agent that continuously sees your screen and hears your audio, lets you talk to it via voice, and can write its own new tools at runtime without rebuilding.
+**What is Samuel?**
+An open-source voice AI desktop agent that continuously sees your screen and hears your audio, lets you control it by voice, browses the web like a human, and writes and repairs its own tools at runtime using GPT-5.5 with reasoning.
 
 **What can I use it for?**
-Common uses include learning a language while watching anime or YouTube, having an AI explain what's happening in a meeting in real time, asking questions about content on your screen without screenshotting, searching the web for lyrics or information by voice, and having a hands-free coding or writing assistant.
+Language learning while watching content, hands-free web browsing ("show me my emails"), building custom AI tools by voice, live meeting interpretation, searching and summarizing anything on the web, and general desktop automation.
 
-**How is this different from Granola, Cluely, or Otter?**
-Granola and Otter are meeting-transcription tools. Cluely is an exam/interview overlay. This agent is an always-on companion that combines screen vision, audio listening, voice conversation, persistent memory, and runtime self-modification — designed for ambient assistance, not single-purpose tasks.
+**How is this different from ChatGPT Voice?**
+ChatGPT can't see your screen continuously, can't browse the web as a real browser, can't write persistent tools, and can't auto-repair when things break. Samuel does all of these, and runs locally on your Mac.
 
 **What models does it use?**
-OpenAI Realtime API for voice, GPT-4o Vision for screen capture analysis, GPT-4o-mini for annotations, Whisper for transcription.
+OpenAI Realtime API for voice, GPT-5.5 with reasoning for code generation and failure diagnosis, GPT-4o Vision for screen capture, GPT-4o-mini for code review, Whisper for transcription.
 
-**Is it free?**
-The code is MIT-licensed and free. You pay OpenAI API costs directly — typically $0.02-0.05/min when ambient features are active.
+**How does auto-repair work?**
+Every plugin declares a `validates()` function. If output fails validation, or the user says "that's wrong," GPT-5.5 diagnoses the failure (syntax bug? API change? structural issue?), picks a repair strategy (patch, rewrite, or ask user), generates a fix, and verifies it before deploying. Max 2 attempts, then clean escalation.
 
-**Does it work on Windows or Linux?**
-Currently macOS only. Windows and Linux are on the roadmap.
+**Can Samuel modify its existing tools?**
+Yes, via the wraps/middleware pattern. A plugin can wrap any existing tool — intercepting calls, modifying inputs/outputs, adding caching or logging — without replacing the original.
 
-**What does "self-modifying" mean?**
-You can ask the agent to add a new capability ("add a weather tool") and it generates the code, asks for your approval, and hot-loads it into the running session. No rebuild required.
-
-**What is procedural memory?**
-When Samuel successfully completes a multi-step workflow (like fixing lyrics by searching the web, comparing, and correcting), he saves the steps as a reusable "skill" in `~/.samuel/skills/`. Next time you ask for something similar, he loads the skill and follows the proven steps instead of improvising.
+**Does Samuel browse the web?**
+Three ways: (1) API-based search via SerpAPI, (2) AI-powered deep search via OpenAI, (3) real browser automation via Playwright where he opens a visible Chromium window, you sign in, and he reads/interacts with the page.
 
 **Is my data private?**
-Screen captures and audio are sent to OpenAI's APIs for processing. Memory, preferences, skills, and secrets are stored locally in `~/.samuel/`. Nothing is sent to third-party servers besides OpenAI.
+Screen captures and audio are sent to OpenAI for processing. Memory, preferences, skills, plugins, and secrets are stored locally in `~/.samuel/`. Browser sessions run locally via Playwright.
 
----
+**Is it free?**
+The code is MIT-licensed. You pay OpenAI API costs directly.
 
-## Used by
-
-Using Samuel for something interesting? [Open a PR](https://github.com/sambuild04/screen-voice-agent/pulls) adding yourself.
-
-*(Be the first.)*
+**Does it work on Windows or Linux?**
+Currently macOS only. Cross-platform is on the roadmap.
 
 ---
 
 ## Contributing
 
-Samuel is a one-person project growing into something bigger. Every contribution — code, skills, ideas, bug reports, even a thoughtful issue comment — genuinely shapes where this goes next.
+Samuel is growing fast. Every contribution — code, skills, ideas, bug reports — shapes where this goes.
 
-### What we need help with right now
+### What we need help with
 
-- **Windows + Linux ports** — Samuel is macOS-only because of ScreenCaptureKit and Peekaboo. We need someone who knows Windows audio capture (WASAPI) or Linux equivalents (PipeWire/PulseAudio) to port the system-audio listener.
-- **One-click installer** — packaging Samuel as a signed `.dmg` so users don't need Rust + npm + Swift to try it. Tauri experience welcome.
-- **MCP integration** — wiring up `@openai/agents` with MCP server support so Samuel can talk to Notion, Gmail, Slack, etc. Currently the highest-leverage feature on the roadmap.
-- **Skill / plugin contributions** — write a workflow you'd actually use (see below).
-- **Tool description tuning** — the better the descriptions, the more reliably Samuel picks the right tool. PRs welcome.
-- **Documentation** — walk through the install on your machine and tell us where you got stuck. The "what tripped me up" issues are surprisingly valuable.
-- **Translations** — currently English-only. Native speakers of any language welcome to translate UI strings and prompt examples.
-
-### Contribute a skill (no coding required)
-
-Samuel learns by doing — but you can teach him faster by writing skills. A skill is a markdown file describing a useful workflow. Examples we'd love:
-
-- "Generate lyrics from a YouTube video, verify against multiple sources, let me pick"
-- "Summarize my recorded meeting and email me the action items"
-- "Watch my coding session and remind me when I've been stuck on the same error for 10 minutes"
-- "Daily standup: ask me what I'm doing today and save it as a Notion entry"
-- Any 3+ step workflow you do at your computer
-
-Submit a markdown file via PR to `skills/community/`. Featured skills get highlighted in releases.
-
-### Good first issues
-
-New to the codebase? These are scoped for someone unfamiliar with the project:
-
-- [Issues labeled `good first issue`](https://github.com/sambuild04/screen-voice-agent/labels/good%20first%20issue)
-
-If none look right, [open an issue](https://github.com/sambuild04/screen-voice-agent/issues/new) describing what you'd like to work on and we'll help you scope it.
+- **Windows + Linux ports** — ScreenCaptureKit alternatives (WASAPI, PipeWire/PulseAudio)
+- **One-click installer** — signed `.dmg` packaging (Tauri experience welcome)
+- **Persistent browser sessions** — save Playwright cookies/profiles across launches
+- **Plugin sandboxing** — Web Worker isolation for plugin execution
+- **MCP integration** — `@openai/agents` + MCP servers for Notion, Slack, etc.
+- **Skill contributions** — write workflows you'd actually use
+- **Tool description tuning** — better descriptions = more reliable tool selection
+- **Documentation** — install walkthroughs and "what tripped me up" reports
 
 ### How to help, by time available
 
 | Time | What you can do |
 |---|---|
-| **5 minutes** | Star the repo. Tweet about it. Tell one friend who'd find it useful. |
-| **30 minutes** | Try Samuel and report a bug. Suggest a feature. Comment on an issue. |
-| **2 hours** | Write a skill. Improve a tool description. Translate UI strings. |
-| **A weekend** | Pick a `good first issue`. Build an MCP integration. Write a doc walkthrough. |
-| **Bigger** | Co-own a workstream — Windows port, MCP integration, skill marketplace. DM me. |
-
-### What you get
-
-- Your name in the README, release notes, and the Contributors section.
-- Your skill featured in the official library, used by every Samuel user.
-- Direct collaboration with the founder — this is a one-person project; you'll talk to me directly.
-- Early access to new features and a real say in what gets built next.
-- A real, shippable open-source contribution for your portfolio.
+| **5 minutes** | Star the repo. Share it. Tell one person. |
+| **30 minutes** | Try Samuel and report a bug or suggest a feature. |
+| **2 hours** | Write a skill. Improve a tool description. |
+| **A weekend** | Pick a `good first issue`. Build a plugin. Write docs. |
+| **Bigger** | Co-own a workstream — Windows port, MCP, plugin sandbox. |
 
 ### Setup for contributors
 
@@ -459,21 +435,18 @@ If none look right, [open an issue](https://github.com/sambuild04/screen-voice-a
 git clone https://github.com/sambuild04/screen-voice-agent.git
 cd screen-voice-agent
 npm install
+npx playwright install chromium
 swiftc -o src-tauri/helpers/record-audio src-tauri/helpers/record-audio.swift \
   -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia
 echo '{"apiKey": "sk-..."}' > ~/.samuel/config.json
 npm run tauri:dev
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, code style, and PR process.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow and PR process.
 
 ### Contributors
 
-Thanks to everyone who's helped:
-
 [![Contributors](https://contrib.rocks/image?repo=sambuild04/screen-voice-agent)](https://github.com/sambuild04/screen-voice-agent/graphs/contributors)
-
-Includes code, skills, docs, design, ideas, and bug reports.
 
 ---
 

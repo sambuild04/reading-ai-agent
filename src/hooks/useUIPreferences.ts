@@ -154,6 +154,16 @@ const SCHEMA: Record<string, PropSchema> = {
     aliases: ["theme.roundness", "app.roundness"],
   },
 
+  // ── Window size ──
+  "window.width": {
+    type: "number", default: 520, min: 400, max: 1200, step: 50, unit: "px",
+    aliases: ["app.width", "window.size"],
+  },
+  "window.height": {
+    type: "number", default: 740, min: 400, max: 1200, step: 50, unit: "px",
+    aliases: ["app.height"],
+  },
+
   // ── Privacy (non-visual but voice-toggleable) ──
   "privacy.screen_watch": {
     type: "boolean", default: false,

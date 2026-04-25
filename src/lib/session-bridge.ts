@@ -320,7 +320,7 @@ export interface PluginProposal {
   summary: string;
 }
 
-export type PluginBuildPhase = "generating" | "validating" | "retrying" | "checking" | "installing" | "reloading" | "done" | "error";
+export type PluginBuildPhase = "generating" | "validating" | "retrying" | "checking" | "installing" | "reloading" | "diagnosing" | "repairing" | "done" | "error";
 
 export interface PluginBuildProgress {
   name: string;
