@@ -1782,6 +1782,8 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
         _ => "ja", // default to Japanese since that's the primary use case
     };
 
+    // gpt-4o-transcribe handles anime dialogue under music/SFX much better
+    // than gpt-4o-mini-transcribe — worth the cost for learning accuracy
     let whisper_output = Command::new("curl")
         .args([
             "-s",
@@ -1790,9 +1792,9 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
             "https://api.openai.com/v1/audio/transcriptions",
             "-H", &format!("Authorization: Bearer {api_key}"),
             "-F", &format!("file=@{LEARNING_AUDIO_PATH}"),
-            "-F", "model=gpt-4o-mini-transcribe",
+            "-F", "model=gpt-4o-transcribe",
             "-F", &format!("language={lang_code}"),
-            "-F", "prompt=Transcribe the speech accurately. Ignore background music and sound effects. If no speech, return empty.",
+            "-F", "prompt=Transcribe the dialogue speech accurately. There may be background music and sound effects — focus on the spoken words only. If no speech, return empty.",
         ])
         .output()
         .map_err(|e| format!("curl: {e}"))?;
@@ -1820,15 +1822,49 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
         return Ok(empty);
     }
 
-    // Filter out Samuel's own TTS voice leaking back into the recorder
+    // Filter out Samuel's own TTS voice leaking back into the recorder.
+    // The system audio recorder captures ALL system sound including Samuel's
+    // speech synthesis. We aggressively filter English sentences that match
+    // Samuel's speaking patterns so they don't get treated as anime dialogue.
     let lower = transcript.to_lowercase();
     let self_talk_markers = [
-        "sir,", "sir.", "understood, sir", "in japanese that",
-        "in japanese it", "means '", "i'll keep that", "how may i assist",
-        "good evening", "shall i", "let me explain",
+        // Samuel's characteristic speech patterns
+        "sir,", "sir.", "understood, sir", "certainly, sir",
+        "how may i assist", "shall i", "let me explain", "let me look",
+        "let me check", "let me find", "let me search", "let me help",
+        "i'll keep that", "i'll look into", "i'll help", "i'll search",
+        "good evening", "good morning", "good afternoon",
+        // Language teaching self-references
+        "in japanese that", "in japanese it", "in japanese,",
+        "in chinese that", "in chinese it", "in chinese,",
+        "in korean that", "in korean it", "in korean,",
+        "means '", "means \"", "which means",
+        "i heard", "the term", "the word",
+        // Capability/limitation statements
+        "i can't accurately", "i can't determine", "i can't see",
+        "i can't identify", "i don't have the ability",
+        "i don't have exact", "i currently can't",
+        "from the audio alone", "without clear context",
+        "if you'd like, i can", "if you share",
+        // General assistant patterns (English full sentences)
+        "would you like me to", "is there anything",
+        "i can assist", "i can help", "i can take a look",
+        "based on the earlier context",
     ];
     if self_talk_markers.iter().any(|m| lower.contains(m)) {
         eprintln!("[learning-audio] filtered self-talk: {}", truncate_str(&transcript, 80));
+        return Ok(empty);
+    }
+
+    // Heuristic: if the transcript is mostly English words (>80% ASCII) and
+    // the target language is non-Latin (ja/zh/ko), it's very likely Samuel's
+    // own voice or unrelated English audio, not target-language content.
+    let ascii_ratio = lower.chars().filter(|c| c.is_ascii()).count() as f64
+        / lower.chars().count().max(1) as f64;
+    let non_latin_targets = ["ja", "zh", "ko"];
+    if non_latin_targets.contains(&lang_code) && ascii_ratio > 0.85 && transcript.len() > 20 {
+        eprintln!("[learning-audio] filtered English audio ({}% ASCII): {}",
+            (ascii_ratio * 100.0) as u32, truncate_str(&transcript, 80));
         return Ok(empty);
     }
 
@@ -1864,7 +1900,12 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
         "messages": [
             {
                 "role": "system",
-                "content": format!("You are a {language} learning assistant. Keep responses very short and voice-friendly.")
+                "content": format!(
+                    "You are a {language} learning assistant. Keep responses very short and voice-friendly. \
+                     CRITICAL: You are analyzing a transcript of audio that was captured from system speakers. \
+                     If the transcript appears to be an AI assistant speaking (phrases like 'sir', 'I can', \
+                     'let me', 'would you like') rather than actual {language} media content, respond with NONE."
+                )
             },
             { "role": "user", "content": analysis_prompt }
         ],
