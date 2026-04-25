@@ -1061,9 +1061,9 @@ interface BrowserResult { ok: boolean; data: Record<string, unknown>; }
 const browserUseTool = tool({
   name: "browser_use",
   description:
-    "Control a real browser like a human. Opens a visible browser window the user can see.\n" +
-    "Use for ANY service that requires sign-in (Gmail, Outlook, LinkedIn, etc.) — no API keys or OAuth needed.\n" +
-    "The user signs in themselves, then you can read and interact with the page.\n\n" +
+    "Control the user's real Chrome browser. Opens tabs in their actual Chrome with existing logins.\n" +
+    "The user is ALREADY signed in to their services — no re-login needed.\n" +
+    "For complex multi-step tasks, prefer computer_use instead (GPT-5.5 visual agent).\n\n" +
     "Actions:\n" +
     "- 'open': Open a URL in a new browser tab. Use to start browsing.\n" +
     "- 'goto': Navigate the current tab to a new URL.\n" +
@@ -1085,8 +1085,8 @@ const browserUseTool = tool({
     "3. wait + screenshot to check if signed in\n" +
     "4. read_page to get email content\n" +
     "5. Summarize and present to user\n\n" +
-    "IMPORTANT: Always tell the user what you're doing. Let them sign in themselves.\n" +
-    "After sign-in, you can read, navigate, click — just like a human browsing.",
+    "IMPORTANT: Always tell the user what you're doing. Their sessions are already available.\n" +
+    "For complex multi-step workflows, prefer computer_use (GPT-5.5 visual agent) instead.",
   parameters: z.object({
     action: z.enum([
       "open", "goto", "read_page", "read_structure",
@@ -1674,11 +1674,11 @@ ALWAYS try the next fallback BEFORE telling the user something failed.
 3. Ask user to describe what they see.
 
 ## Accessing a web service (Gmail, LinkedIn, bank, any website):
-1. computer_use(task="<describe what to do>", url="<site URL>") — GPT-5.5 sees and operates the browser
-2. Tell user "I'm opening [site] now. Please sign in if needed — I'll watch and continue once you're in."
+1. computer_use(task="<describe what to do>", url="<site URL>") — GPT-5.5 sees and operates the user's Chrome
+2. Tell user "I'm opening [site] in your Chrome now, sir." (they're already signed in — no re-login needed)
 3. computer_use handles the entire workflow: navigating, reading, clicking, filling forms
 4. Present results to user via voice summary + show_content panel if visual
-This works for ANY website. No setup, no API keys, no OAuth. GPT-5.5 sees the screen and acts.
+This works for ANY website. No setup, no API keys, no OAuth. Uses the user's real Chrome with their sessions.
 FALLBACK: If computer_use fails, use browser_use for manual step-by-step control.
 Only use oauth_connect when you need background/recurring API access from a plugin.
 
@@ -1803,13 +1803,14 @@ Common scopes:
 
 ## computer_use — GPT-5.5 visual browser agent (MOST POWERFUL — use for complex tasks)
 Delegates to GPT-5.5's built-in computer use: it sees screenshots and operates the browser autonomously.
-Use for ANY complex browser workflow: sign into services, fill multi-step forms, navigate dashboards,
-read emails, book flights, complete transactions, or interact with any web app.
-GPT-5.5 visually understands the page and handles popups, layout changes, login walls automatically.
+IMPORTANT: This operates the user's REAL Chrome browser — they're already signed into everything.
+No re-login needed for Gmail, DoorDash, LinkedIn, bank, etc. Their cookies and sessions are there.
+Use for ANY complex browser workflow: check emails, place orders, fill forms, navigate dashboards.
+GPT-5.5 visually understands the page and handles popups, layout changes automatically.
 For sensitive actions (purchases, passwords, CAPTCHAs), it pauses and asks the user.
 WORKFLOW:
-  1. computer_use(task="Go to Gmail, open the first unread email, and summarize it", url="https://mail.google.com")
-  2. Tell the user "I'm opening Gmail now, sir. Please sign in if needed — I'll wait."
+  1. computer_use(task="Go to Gmail and summarize my unread emails", url="https://mail.google.com")
+  2. Tell the user "I'm opening Gmail in your Chrome now, sir."
   3. The model loops: screenshot → plan → act → screenshot → ... until done
   4. You get back a summary + final screenshot
   5. Present the results to the user (use show_content for visual display)
@@ -1817,7 +1818,8 @@ ALWAYS prefer computer_use over browser_use for complex multi-step tasks.
 browser_use is still fine for simple open+read tasks.
 
 ## browser_use — Simple browser commands (use for quick tasks)
-Control a real browser window with individual commands. Good for simple URL open + read tasks.
+Control the user's real Chrome with individual commands. Good for simple URL open + read tasks.
+The user's existing logins/sessions are available — no need to ask them to sign in again.
 Actions: open, goto, read_page, read_structure, click, type, press, screenshot, scroll, wait, list_tabs, switch_tab, close_tab, close.
 Use browser_use when you just need to: open a URL, read page text, click a single link.
 For anything complex (multi-step navigation, forms, dashboards), prefer computer_use instead.

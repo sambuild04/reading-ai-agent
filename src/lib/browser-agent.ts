@@ -1,19 +1,19 @@
 /**
- * Browser automation agent powered by Playwright.
+ * Browser automation agent — connects to the user's real Chrome.
+ *
+ * Uses puppeteer-core to attach to Chrome via the DevTools Protocol.
+ * No separate Chromium download needed — operates the user's actual browser
+ * with their existing sessions, cookies, and logins.
  *
  * Runs as a sidecar process. Receives JSON commands on stdin,
- * returns JSON results on stdout. The Tauri backend spawns this
- * and communicates via the simple line-delimited JSON protocol.
- *
- * Commands: open, goto, read_page, click, type, screenshot, scroll,
- *           extract, list_tabs, close_tab, close
+ * returns JSON results on stdout.
  */
 
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import * as readline from "readline";
+import { execSync } from "child_process";
 
 let browser: Browser | null = null;
-let context: BrowserContext | null = null;
 const pages = new Map<number, Page>();
 let nextTabId = 1;
 let activeTabId = 0;
@@ -23,20 +23,55 @@ function reply(id: string, ok: boolean, data: unknown) {
   process.stdout.write(msg + "\n");
 }
 
-async function ensureBrowser(): Promise<BrowserContext> {
-  if (!browser || !browser.isConnected()) {
-    browser = await chromium.launch({
-      headless: false,
-      args: ["--disable-blink-features=AutomationControlled"],
-    });
-    context = await browser.newContext({
-      viewport: { width: 1280, height: 900 },
-      userAgent:
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    });
+function findChromeExecutable(): string {
+  const candidates = [
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+  ];
+  for (const p of candidates) {
+    try {
+      execSync(`test -f "${p}"`, { stdio: "ignore" });
+      return p;
+    } catch { /* not found */ }
   }
-  return context!;
+  return candidates[0];
+}
+
+async function ensureBrowser(): Promise<Browser> {
+  if (browser?.connected) return browser;
+
+  // Try connecting to an already-running Chrome with debug port
+  try {
+    browser = await puppeteer.connect({
+      browserURL: "http://127.0.0.1:9222",
+      defaultViewport: null,
+    });
+    process.stderr.write("[browser-agent] connected to existing Chrome on :9222\n");
+    return browser;
+  } catch {
+    // No debuggable Chrome running — launch one
+  }
+
+  const chromePath = findChromeExecutable();
+  process.stderr.write(`[browser-agent] launching Chrome: ${chromePath}\n`);
+
+  browser = await puppeteer.launch({
+    executablePath: chromePath,
+    headless: false,
+    defaultViewport: null,
+    // Use default profile so user has their logins
+    userDataDir: undefined,
+    args: [
+      "--remote-debugging-port=9222",
+      "--no-first-run",
+      "--no-default-browser-check",
+    ],
+    ignoreDefaultArgs: ["--enable-automation"],
+  });
+
+  return browser;
 }
 
 async function getActivePage(): Promise<Page> {
@@ -46,8 +81,8 @@ async function getActivePage(): Promise<Page> {
 }
 
 async function newTab(url?: string): Promise<{ tabId: number; page: Page }> {
-  const ctx = await ensureBrowser();
-  const page = await ctx.newPage();
+  const b = await ensureBrowser();
+  const page = await b.newPage();
   const tabId = nextTabId++;
   pages.set(tabId, page);
   activeTabId = tabId;
@@ -59,35 +94,30 @@ async function newTab(url?: string): Promise<{ tabId: number; page: Page }> {
   return { tabId, page };
 }
 
-// Extract readable text from the current page
 async function extractText(page: Page, selector?: string): Promise<string> {
   return page.evaluate((sel) => {
     const el = sel ? document.querySelector(sel) : document.body;
     if (!el) return "(element not found)";
 
-    // Remove scripts, styles, nav, header, footer for cleaner content
     const clone = el.cloneNode(true) as HTMLElement;
     for (const tag of ["script", "style", "nav", "header", "footer", "iframe", "noscript"]) {
       clone.querySelectorAll(tag).forEach((n) => n.remove());
     }
 
-    // Get visible text, collapse whitespace
     const text = clone.innerText || clone.textContent || "";
     return text
       .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0)
+      .map((l: string) => l.trim())
+      .filter((l: string) => l.length > 0)
       .join("\n")
       .slice(0, 15000);
   }, selector);
 }
 
-// Extract structured data (links, inputs, buttons) for agent navigation
 async function extractStructure(page: Page): Promise<string> {
   return page.evaluate(() => {
     const items: string[] = [];
 
-    // Clickable elements
     const clickable = document.querySelectorAll("a[href], button, [role='button'], input[type='submit']");
     const seen = new Set<string>();
     clickable.forEach((el, i) => {
@@ -102,7 +132,6 @@ async function extractStructure(page: Page): Promise<string> {
       }
     });
 
-    // Input fields
     const inputs = document.querySelectorAll("input:not([type='hidden']), textarea, select");
     inputs.forEach((el) => {
       const inp = el as HTMLInputElement;
@@ -158,15 +187,24 @@ async function handleCommand(cmd: { id: string; action: string; [k: string]: unk
         const page = await getActivePage();
         const sel = cmd.selector as string;
         if (cmd.text) {
-          // Click by visible text
           const text = cmd.text as string;
-          await page.getByText(text, { exact: false }).first().click({ timeout: 10000 });
+          const elements = await page.$$("a, button, [role='button'], span, div, li, td");
+          let clicked = false;
+          for (const el of elements) {
+            const elText = await el.evaluate((e) => (e as HTMLElement).innerText?.trim() ?? "");
+            if (elText.includes(text)) {
+              await el.click();
+              clicked = true;
+              break;
+            }
+          }
+          if (!clicked) throw new Error(`No element with text "${text}" found`);
         } else if (sel) {
-          await page.click(sel, { timeout: 10000 });
+          await page.click(sel);
         } else {
           throw new Error("Need 'selector' or 'text' to click");
         }
-        await page.waitForLoadState("domcontentloaded").catch(() => {});
+        await new Promise((r) => setTimeout(r, 1000));
         const title = await page.title();
         reply(cmd.id, true, { title, url: page.url(), message: `Clicked. Now on: ${title}` });
         break;
@@ -175,15 +213,20 @@ async function handleCommand(cmd: { id: string; action: string; [k: string]: unk
       case "type": {
         const page = await getActivePage();
         const sel = (cmd.selector as string) || "input:focus, textarea:focus, [contenteditable]:focus";
-        await page.fill(sel, cmd.text as string);
+        await page.click(sel);
+        await page.evaluate((s) => {
+          const el = document.querySelector(s) as HTMLInputElement;
+          if (el) el.value = "";
+        }, sel);
+        await page.type(sel, cmd.text as string);
         reply(cmd.id, true, { message: `Typed into ${sel}` });
         break;
       }
 
       case "press": {
         const page = await getActivePage();
-        await page.keyboard.press(cmd.key as string);
-        await page.waitForLoadState("domcontentloaded").catch(() => {});
+        await page.keyboard.press(cmd.key as string as any);
+        await new Promise((r) => setTimeout(r, 500));
         reply(cmd.id, true, { message: `Pressed ${cmd.key}` });
         break;
       }
@@ -191,7 +234,7 @@ async function handleCommand(cmd: { id: string; action: string; [k: string]: unk
       case "screenshot": {
         const page = await getActivePage();
         const buf = await page.screenshot({ type: "jpeg", quality: 70 });
-        const base64 = buf.toString("base64");
+        const base64 = Buffer.from(buf).toString("base64");
         reply(cmd.id, true, { base64, mimeType: "image/jpeg", title: await page.title() });
         break;
       }
@@ -209,10 +252,8 @@ async function handleCommand(cmd: { id: string; action: string; [k: string]: unk
       }
 
       case "wait": {
-        const page = await getActivePage();
-        const ms = Math.min((cmd.ms as number) || 2000, 10000);
-        await page.waitForTimeout(ms);
-        reply(cmd.id, true, { message: `Waited ${ms}ms` });
+        await new Promise((r) => setTimeout(r, Math.min((cmd.ms as number) || 2000, 10000)));
+        reply(cmd.id, true, { message: `Waited ${cmd.ms ?? 2000}ms` });
         break;
       }
 
@@ -230,6 +271,7 @@ async function handleCommand(cmd: { id: string; action: string; [k: string]: unk
         if (!pages.has(tabId)) throw new Error(`Tab #${tabId} not found`);
         activeTabId = tabId;
         const page = pages.get(tabId)!;
+        await page.bringToFront();
         reply(cmd.id, true, { tabId, title: await page.title(), url: page.url() });
         break;
       }
@@ -249,13 +291,15 @@ async function handleCommand(cmd: { id: string; action: string; [k: string]: unk
       }
 
       // ── CUA (Computer Use Agent) actions ──────────────────────────────
-      // These mirror the GPT-5.5 computer tool action vocabulary exactly.
 
       case "cua_screenshot": {
         const page = await getActivePage();
         const buf = await page.screenshot({ type: "png", fullPage: false });
-        const base64 = buf.toString("base64");
-        const vp = page.viewportSize() ?? { width: 1280, height: 900 };
+        const base64 = Buffer.from(buf).toString("base64");
+        const vp = await page.evaluate(() => ({
+          width: window.innerWidth,
+          height: window.innerHeight,
+        }));
         reply(cmd.id, true, {
           base64,
           mimeType: "image/png",
@@ -271,22 +315,18 @@ async function handleCommand(cmd: { id: string; action: string; [k: string]: unk
         const page = await getActivePage();
         const x = cmd.x as number;
         const y = cmd.y as number;
-        const button = (cmd.button as "left" | "right" | "middle") ?? "left";
         const modifiers: string[] = (cmd.keys as string[]) ?? [];
-        const pw = modifiers.map(modToPw).filter(Boolean) as string[];
-        for (const m of pw) await page.keyboard.down(m);
-        await page.mouse.click(x, y, { button });
-        for (const m of pw) await page.keyboard.up(m);
+        for (const m of modifiers) await page.keyboard.down(modToPuppeteer(m));
+        await page.mouse.click(x, y);
+        for (const m of modifiers) await page.keyboard.up(modToPuppeteer(m));
         reply(cmd.id, true, { message: `Clicked (${x}, ${y})` });
         break;
       }
 
       case "cua_double_click": {
         const page = await getActivePage();
-        const x = cmd.x as number;
-        const y = cmd.y as number;
-        await page.mouse.dblclick(x, y);
-        reply(cmd.id, true, { message: `Double-clicked (${x}, ${y})` });
+        await page.mouse.click(cmd.x as number, cmd.y as number, { clickCount: 2 });
+        reply(cmd.id, true, { message: `Double-clicked (${cmd.x}, ${cmd.y})` });
         break;
       }
 
@@ -301,7 +341,7 @@ async function handleCommand(cmd: { id: string; action: string; [k: string]: unk
         const page = await getActivePage();
         const keys: string[] = (cmd.keys as string[]) ?? [cmd.key as string];
         for (const k of keys) {
-          await page.keyboard.press(normalizeKey(k));
+          await page.keyboard.press(normalizeKey(k) as any);
         }
         reply(cmd.id, true, { message: `Pressed keys: ${keys.join("+")}` });
         break;
@@ -314,7 +354,7 @@ async function handleCommand(cmd: { id: string; action: string; [k: string]: unk
         const dx = (cmd.scroll_x as number) ?? 0;
         const dy = (cmd.scroll_y as number) ?? 0;
         await page.mouse.move(x, y);
-        await page.mouse.wheel(dx, dy);
+        await page.mouse.wheel({ deltaX: dx, deltaY: dy });
         reply(cmd.id, true, { message: `Scrolled (${dx}, ${dy}) at (${x}, ${y})` });
         break;
       }
@@ -344,15 +384,22 @@ async function handleCommand(cmd: { id: string; action: string; [k: string]: unk
       }
 
       case "cua_wait": {
-        const page = await getActivePage();
-        await page.waitForTimeout(Math.min((cmd.ms as number) ?? 2000, 15000));
+        await new Promise((r) => setTimeout(r, Math.min((cmd.ms as number) ?? 2000, 15000)));
         reply(cmd.id, true, { message: "Wait complete" });
         break;
       }
 
       case "close": {
-        if (browser) await browser.close();
-        reply(cmd.id, true, { message: "Browser closed" });
+        // Only close pages we opened, don't kill the user's browser
+        for (const [, page] of pages) {
+          await page.close().catch(() => {});
+        }
+        pages.clear();
+        if (browser) {
+          browser.disconnect();
+          browser = null;
+        }
+        reply(cmd.id, true, { message: "Disconnected from browser" });
         process.exit(0);
         break;
       }
@@ -366,18 +413,16 @@ async function handleCommand(cmd: { id: string; action: string; [k: string]: unk
   }
 }
 
-// Map GPT-5.5 modifier names to Playwright modifiers
-function modToPw(key: string): string | null {
+function modToPuppeteer(key: string): any {
   const m: Record<string, string> = {
     CTRL: "Control", CONTROL: "Control",
     ALT: "Alt", OPTION: "Alt",
     SHIFT: "Shift",
     META: "Meta", CMD: "Meta", COMMAND: "Meta",
   };
-  return m[key.toUpperCase()] ?? null;
+  return m[key.toUpperCase()] ?? key;
 }
 
-// Normalize GPT-5.5 key names to Playwright key names
 function normalizeKey(key: string): string {
   const m: Record<string, string> = {
     ENTER: "Enter", RETURN: "Enter",
@@ -392,7 +437,6 @@ function normalizeKey(key: string): string {
   return m[key.toUpperCase()] ?? key;
 }
 
-// Read JSON commands from stdin, one per line
 const rl = readline.createInterface({ input: process.stdin });
 rl.on("line", (line) => {
   try {
