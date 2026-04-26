@@ -139,12 +139,54 @@ export function useLearningMode(
         if (screenHint && !screenHint.startsWith("NONE")) {
           contextParts.push(`Screen: "${screenHint}"`);
         }
+
+        // Check active watches against new content and notify user on match
+        const watchTexts: string[] = [];
+        if (audioResult.transcript) watchTexts.push(audioResult.transcript);
+        if (audioResult.hint) watchTexts.push(audioResult.hint);
+        if (screenHint && !screenHint.startsWith("NONE")) watchTexts.push(screenHint);
+        if (watchTexts.length > 0) {
+          const combined = watchTexts.join(" ");
+          const [audioMatches, screenMatches] = await Promise.all([
+            audioResult.transcript
+              ? invoke<string[]>("watch_check", { text: audioResult.transcript, source: "audio" }).catch(() => [])
+              : Promise.resolve([]),
+            screenHint && !screenHint.startsWith("NONE")
+              ? invoke<string[]>("watch_check", { text: screenHint, source: "screen" }).catch(() => [])
+              : Promise.resolve([]),
+          ]);
+          const allMatches = [...new Set([...audioMatches, ...screenMatches])];
+          if (allMatches.length > 0) {
+            const matchList = allMatches.join("; ");
+            console.log(`[watch] triggered: ${matchList}`);
+            sendTextAndRespond(
+              `[System: WATCH ALERT — The following watches matched just now: ${matchList}. ` +
+              `Context: ${combined}. ` +
+              `Briefly notify the user about what you detected. Be specific about what you saw/heard ` +
+              `and why it matches their watch. Keep it short — 1-2 sentences.]`,
+            );
+          }
+        }
+
         if (contextParts.length > 0) {
+          // Include active judgment-based watches so Samuel can evaluate them
+          const watches = await invoke<Array<{ id: string; description: string; keywords: string[] }>>(
+            "watch_list",
+          ).catch(() => []);
+          const judgmentWatches = watches.filter((w) => w.keywords.length === 0);
+          let watchNote = "";
+          if (judgmentWatches.length > 0) {
+            const descs = judgmentWatches.map((w) => w.description).join("; ");
+            watchNote =
+              ` ACTIVE WATCHES (use your judgment): ${descs}. ` +
+              `If the ambient context matches any watch, proactively notify the user.`;
+          }
+
           const contextMsg = contextParts.join(" | ");
           sendSilentContext(
             `[System: Ambient context — ${contextMsg}. ` +
-            `You are passively listening. Do NOT interrupt the user. ` +
-            `Only share vocabulary hints when the user asks or during scheduled review.]`,
+            `You are passively listening. Do NOT interrupt the user unless a watch triggers. ` +
+            `Only share vocabulary hints when the user asks or during scheduled review.${watchNote}]`,
           );
           contextBufferRef.current.push(contextMsg);
           if (contextBufferRef.current.length > 15) {

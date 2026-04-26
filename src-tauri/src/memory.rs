@@ -30,6 +30,27 @@ pub struct WatchEntry {
     pub total_minutes: u32,
 }
 
+/// An active alert: something Samuel is watching for in audio or on screen.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WatchAlert {
+    pub id: String,
+    pub description: String,
+    /// Specific keywords/patterns to match (lowercase). Empty = rely on LLM judgment.
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    /// "audio", "screen", or "both"
+    #[serde(default = "default_watch_source")]
+    pub source: String,
+    pub created_at: u64,
+    /// How many times this alert has fired
+    #[serde(default)]
+    pub fire_count: u32,
+}
+
+fn default_watch_source() -> String {
+    "both".to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct SamuelMemory {
     #[serde(default)]
@@ -44,6 +65,8 @@ pub struct SamuelMemory {
     pub corrections: Vec<Correction>,
     #[serde(default)]
     pub watch_history: Vec<WatchEntry>,
+    #[serde(default)]
+    pub active_watches: Vec<WatchAlert>,
 }
 
 static MEMORY: Mutex<Option<SamuelMemory>> = Mutex::new(None);
@@ -313,6 +336,122 @@ pub fn get_recent_corrections() -> Vec<String> {
             .map(|c| c.what.clone())
             .collect()
     })
+}
+
+// ── Watch/alert helpers ──────────────────────────────────────────────────────
+
+const MAX_WATCHES: usize = 20;
+
+pub fn add_watch(description: &str, keywords: Vec<String>, source: &str) -> String {
+    let id = format!("w_{}", now_secs());
+    with_memory(|mem| {
+        mem.active_watches.push(WatchAlert {
+            id: id.clone(),
+            description: description.to_string(),
+            keywords: keywords.iter().map(|k| k.to_lowercase()).collect(),
+            source: source.to_string(),
+            created_at: now_secs(),
+            fire_count: 0,
+        });
+        if mem.active_watches.len() > MAX_WATCHES {
+            mem.active_watches.remove(0);
+        }
+    });
+    id
+}
+
+pub fn remove_watch(id: &str) -> bool {
+    with_memory(|mem| {
+        let before = mem.active_watches.len();
+        mem.active_watches.retain(|w| w.id != id);
+        mem.active_watches.len() < before
+    })
+}
+
+pub fn list_watches() -> Vec<WatchAlert> {
+    with_memory(|mem| mem.active_watches.clone())
+}
+
+pub fn clear_watches() {
+    with_memory(|mem| mem.active_watches.clear());
+}
+
+/// Check text (audio transcript or screen content) against active watches.
+/// Returns list of (watch_id, description) for any that match by keyword.
+pub fn check_watches_keyword(text: &str, source: &str) -> Vec<(String, String)> {
+    let lower = text.to_lowercase();
+    with_memory(|mem| {
+        let mut matches = Vec::new();
+        for watch in &mut mem.active_watches {
+            if watch.source != "both" && watch.source != source {
+                continue;
+            }
+            if watch.keywords.is_empty() {
+                continue;
+            }
+            let hit = watch.keywords.iter().any(|kw| lower.contains(kw));
+            if hit {
+                watch.fire_count += 1;
+                matches.push((watch.id.clone(), watch.description.clone()));
+            }
+        }
+        matches
+    })
+}
+
+/// Get active watches formatted for LLM context injection.
+pub fn get_watches_context() -> Option<String> {
+    let watches = list_watches();
+    if watches.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = watches
+        .iter()
+        .map(|w| {
+            let kw = if w.keywords.is_empty() {
+                "any match".to_string()
+            } else {
+                w.keywords.join(", ")
+            };
+            format!("- [{}] {} (keywords: {}, source: {})", w.id, w.description, kw, w.source)
+        })
+        .collect();
+    Some(format!("Active watches:\n{}", lines.join("\n")))
+}
+
+#[tauri::command]
+pub async fn watch_add(description: String, keywords: Vec<String>, source: String) -> Result<String, String> {
+    let id = add_watch(&description, keywords, &source);
+    eprintln!("[watch] added: {id} — {description}");
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn watch_remove(id: String) -> Result<bool, String> {
+    let removed = remove_watch(&id);
+    eprintln!("[watch] removed {id}: {removed}");
+    Ok(removed)
+}
+
+#[tauri::command]
+pub async fn watch_list() -> Result<Vec<WatchAlert>, String> {
+    Ok(list_watches())
+}
+
+#[tauri::command]
+pub async fn watch_clear() -> Result<(), String> {
+    clear_watches();
+    eprintln!("[watch] cleared all watches");
+    Ok(())
+}
+
+/// Check text against active watches (called from frontend learning loop).
+/// Returns matched watch descriptions to trigger notifications.
+#[tauri::command]
+pub async fn watch_check(text: String, source: String) -> Result<Vec<String>, String> {
+    let matches = check_watches_keyword(&text, &source);
+    let descriptions: Vec<String> = matches.into_iter().map(|(_, desc)| desc).collect();
+    Ok(descriptions)
 }
 
 #[tauri::command]

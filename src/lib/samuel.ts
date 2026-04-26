@@ -213,6 +213,92 @@ const markVocabularyKnownTool = tool({
 });
 
 // ---------------------------------------------------------------------------
+// Watch / Alert System
+// ---------------------------------------------------------------------------
+
+const watchTool = tool({
+  name: "watch_for",
+  description:
+    "Set up, remove, or list active watches. Samuel will monitor audio and screen " +
+    "content and proactively notify the user when a match is detected.\n\n" +
+    "Use when the user says things like:\n" +
+    "- 'Notify me when you see/hear an N1 word'\n" +
+    "- 'Let me know if you see any error messages'\n" +
+    "- 'Watch for the word 妖術'\n" +
+    "- 'Alert me when someone mentions price'\n" +
+    "- 'Stop watching for errors'\n" +
+    "- 'What are you watching for?'\n\n" +
+    "Actions:\n" +
+    "- 'add': Create a new watch. Provide description and optional keywords.\n" +
+    "- 'remove': Remove a watch by its id.\n" +
+    "- 'list': Show all active watches.\n" +
+    "- 'clear': Remove all watches.",
+  parameters: z.object({
+    action: z.enum(["add", "remove", "list", "clear"]).describe("Watch action"),
+    description: z
+      .string()
+      .optional()
+      .describe("For 'add': what to watch for, e.g. 'N1 level Japanese words', 'error messages', 'mentions of price'"),
+    keywords: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "For 'add': specific words/phrases to match. If empty, uses LLM judgment against the description. " +
+        "e.g. ['妖術', '唯一'] or ['error', 'exception', 'failed']",
+      ),
+    source: z
+      .string()
+      .optional()
+      .describe("For 'add': 'audio', 'screen', or 'both' (default: 'both')"),
+    id: z.string().optional().describe("For 'remove': the watch id to remove"),
+  }),
+  async execute({ action, description, keywords, source, id }) {
+    switch (action) {
+      case "add": {
+        if (!description) {
+          return toolErr("invalid_input", "Need a description of what to watch for.");
+        }
+        const watchId = await invoke<string>("watch_add", {
+          description,
+          keywords: keywords ?? [],
+          source: source ?? "both",
+        });
+        const kw = keywords?.length ? ` (keywords: ${keywords.join(", ")})` : " (using judgment)";
+        return toolOk(`Watch set: "${description}"${kw}. I'll notify you when I detect this. [id: ${watchId}]`);
+      }
+      case "remove": {
+        if (!id) {
+          return toolErr("invalid_input", "Need the watch id to remove.");
+        }
+        const removed = await invoke<boolean>("watch_remove", { id });
+        return removed
+          ? toolOk(`Watch ${id} removed.`)
+          : toolErr("not_found", `No watch found with id ${id}.`);
+      }
+      case "list": {
+        const watches = await invoke<Array<{ id: string; description: string; keywords: string[]; source: string; fire_count: number }>>(
+          "watch_list",
+        );
+        if (watches.length === 0) {
+          return toolOk("No active watches. Tell me what to watch for!");
+        }
+        const lines = watches.map(
+          (w) =>
+            `- [${w.id}] ${w.description} (${w.keywords.length ? w.keywords.join(", ") : "judgment"}, ${w.source}, fired ${w.fire_count}x)`,
+        );
+        return toolOk(`Active watches:\n${lines.join("\n")}`);
+      }
+      case "clear": {
+        await invoke("watch_clear");
+        return toolOk("All watches cleared.");
+      }
+      default:
+        return toolErr("invalid_action", `Unknown action: ${action}`);
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Language Learning Tools
 // ---------------------------------------------------------------------------
 
@@ -1900,6 +1986,17 @@ DO NOT save trivial single-tool tasks. Only save multi-step workflows.
 - mark_vocabulary_known: Mark words as permanently known — never teach again.
 - record_correction: Store behavioral corrections the user gives you.
 
+## watch_for — Watch / Alert system
+Set up persistent watches for things you should look out for in audio or on screen.
+When the user says "notify me when you see/hear X", use watch_for(action="add").
+Examples:
+- "Let me know when you hear an N1 word" → add watch with description, keywords can be empty (uses your judgment via ambient context)
+- "Watch for error messages" → add with keywords ["error", "exception", "failed", "warning"]
+- "Alert me if you see the word 妖術" → add with keywords ["妖術"]
+- "Stop watching for errors" → list watches, then remove the matching one
+Watches are checked every 20 seconds against audio transcripts and screen content.
+When a match is found, you'll be prompted to notify the user — speak up and tell them what you found.
+
 # Knowing When to Suggest a Better Approach
 When the user is struggling or using a suboptimal path, suggest the shortcut — ONCE:
 - Garbled audio → "Drop the YouTube link for clean lyrics, sir."
@@ -1982,6 +2079,8 @@ export const samuelAgent = new RealtimeAgent({
     rememberPreferenceTool,
     markVocabularyKnownTool,
     recordCorrectionTool,
+    // Watch / alerts
+    watchTool,
     // Teaching & songs (play/pause/lyrics/refetch/correct)
     teachFromContentTool,
     songControlTool,

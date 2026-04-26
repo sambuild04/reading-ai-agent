@@ -1302,13 +1302,28 @@ pub async fn check_audio_for_language(language: String, duration_secs: Option<u6
 
     eprintln!("[learning-mode] audio transcript: {}", truncate_str(&transcript, 120));
 
-    // Ask GPT-4o if this contains the target language and for interesting vocabulary/grammar
+    // Ask GPT-4o for structured vocabulary with JLPT levels
     let analysis_prompt = format!(
-        "You heard the following audio transcript. Determine if it contains {language} speech. \
-         If it does, pick 1-2 interesting words or grammar patterns a {language} learner would \
-         benefit from knowing. Give a brief, voice-friendly explanation (2-3 sentences max). \
-         If the transcript is NOT in {language}, or is just music/noise/English, respond with exactly: NONE\n\n\
-         Transcript: {transcript}"
+        r#"Analyze this audio transcript for {language} learners.
+If it contains {language} speech, extract ALL notable words with their proficiency level.
+If the transcript is NOT in {language}, or is just music/noise/English, respond with exactly: NONE
+
+Return JSON:
+{{
+  "hint": "Brief voice-friendly explanation of 1-2 most interesting words (2-3 sentences max)",
+  "words": [
+    {{ "word": "original", "reading": "pronunciation aid", "meaning": "English meaning", "level": "N1/N2/N3/N4/N5" }}
+  ]
+}}
+
+Rules:
+- For Japanese, use JLPT levels (N5=easiest, N1=hardest)
+- Include ALL {language} words you can identify, not just interesting ones
+- Be accurate with levels — N1 words are advanced (e.g. 妖術, 唯一, 善人), N5 are basic (e.g. 食べる, 大きい)
+- SKIP character names and proper nouns
+- Return ONLY valid JSON, no markdown fences. Or exactly "NONE".
+
+Transcript: {transcript}"#
     );
 
     let gpt_payload = serde_json::json!({
@@ -1318,14 +1333,14 @@ pub async fn check_audio_for_language(language: String, duration_secs: Option<u6
                 "role": "system",
                 "content": format!(
                     "You are a {language} language learning assistant. \
-                     You analyze audio transcripts and highlight interesting vocabulary or grammar \
-                     for a learner. Keep responses very short and suitable for a voice assistant."
+                     You analyze audio transcripts and extract vocabulary with accurate proficiency levels. \
+                     Return structured JSON."
                 )
             },
             { "role": "user", "content": analysis_prompt }
         ],
-        "max_tokens": 200,
-        "temperature": 0.3
+        "max_tokens": 500,
+        "temperature": 0.2
     });
 
     let gpt_output = Command::new("curl")
