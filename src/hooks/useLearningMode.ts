@@ -124,33 +124,23 @@ export function useLearningMode(
           invoke("append_transcript_window", { text: audioResult.transcript }).catch(() => {});
         }
 
-        // Inject the raw audio clip directly into the Realtime session so
-        // Samuel can actually hear the anime/game/video audio, not just
-        // read a text transcript. This dramatically improves comprehension.
+        // Build combined context: audio (raw + transcript + hint) + screen
+        const contextParts: string[] = [];
+
+        // Inject raw PCM audio so Samuel can actually hear the system audio.
+        // This is silent — Samuel stores it as context but doesn't auto-speak.
         if (audioResult.pcm_audio_base64) {
           sendAudioClip(
             audioResult.pcm_audio_base64,
-            `[System: This is ambient ${language} audio from the user's speakers.]`,
+            `[System: Ambient ${language} audio from speakers. Store silently — do NOT speak unless asked.]`,
           );
         }
 
-        // When the backend found something interesting, have Samuel speak
-        // the hint to the user. This is the main teaching moment.
-        if (audioResult.hint) {
-          sendTextAndRespond(
-            `[System: You just heard ${language} audio from the user's speakers. ` +
-            `Here is an analysis of what was said. Share the most interesting point ` +
-            `with the user in 1-2 brief sentences, as if you heard it yourself. ` +
-            `Be natural and conversational — don't say "the analysis says" or ` +
-            `"according to the transcript". Just teach the vocabulary directly.\n\n` +
-            `Analysis: ${audioResult.hint}]`,
-          );
-        }
-
-        // Inject text context for screen + transcript as silent background
-        const contextParts: string[] = [];
         if (audioResult.transcript) {
-          contextParts.push(`Audio transcript: "${audioResult.transcript}"`);
+          contextParts.push(`Audio: "${audioResult.transcript}"`);
+        }
+        if (audioResult.hint) {
+          contextParts.push(`Vocab hint: ${audioResult.hint}`);
         }
         if (screenHint && !screenHint.startsWith("NONE")) {
           contextParts.push(`Screen: "${screenHint}"`);
@@ -158,9 +148,10 @@ export function useLearningMode(
         if (contextParts.length > 0) {
           const contextMsg = contextParts.join(" | ");
           sendSilentContext(
-            `[System: Ambient context — ${contextMsg}. Do NOT speak about this unless the user asks.]`,
+            `[System: Ambient context — ${contextMsg}. ` +
+            `You are passively listening. Do NOT interrupt the user. ` +
+            `Only share vocabulary hints when the user asks or during scheduled review.]`,
           );
-          // Accumulate for Samuel's periodic review (auto mode)
           contextBufferRef.current.push(contextMsg);
           if (contextBufferRef.current.length > 15) {
             contextBufferRef.current = contextBufferRef.current.slice(-15);
