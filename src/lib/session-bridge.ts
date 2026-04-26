@@ -11,6 +11,7 @@ type RecordingActionFn = (action: "start" | "stop" | "processing" | "analyze" | 
 type LearningLanguageFn = (language: string | null) => void;
 type SendSilentContextFn = (text: string) => void;
 type SendTextAndRespondFn = (text: string) => void;
+type SendAudioClipFn = (pcmBase64: string, contextText?: string) => void;
 type TeachContentFn = (input: string, language?: string) => void;
 type UIUpdateFn = (component: string, property: string, value: string) => string;
 
@@ -21,6 +22,7 @@ let recordingActionFn: RecordingActionFn | null = null;
 let learningLanguageFn: LearningLanguageFn | null = null;
 let sendSilentContextFn: SendSilentContextFn | null = null;
 let sendTextAndRespondFn: SendTextAndRespondFn | null = null;
+let sendAudioClipFn: SendAudioClipFn | null = null;
 let teachContentFn: TeachContentFn | null = null;
 let uiUpdateFn: UIUpdateFn | null = null;
 
@@ -109,6 +111,21 @@ export function registerSendTextAndRespond(fn: SendTextAndRespondFn | null) {
 export function sendTextAndRespond(text: string): boolean {
   if (!sendTextAndRespondFn) return false;
   sendTextAndRespondFn(text);
+  return true;
+}
+
+export function registerSendAudioClip(fn: SendAudioClipFn | null) {
+  sendAudioClipFn = fn;
+}
+
+/**
+ * Inject a PCM16 24kHz audio clip directly into the Realtime session so the
+ * model can *hear* it (e.g. system audio from anime/games). Optional context
+ * text is injected alongside so Samuel knows where the audio came from.
+ */
+export function sendAudioClip(pcmBase64: string, contextText?: string): boolean {
+  if (!sendAudioClipFn) return false;
+  sendAudioClipFn(pcmBase64, contextText);
   return true;
 }
 

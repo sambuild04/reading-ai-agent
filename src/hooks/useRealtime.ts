@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { RealtimeAgent, RealtimeSession } from "@openai/agents/realtime";
 import { samuelAgent } from "../lib/samuel";
-import { registerSendImage, registerSendText, registerScreenTarget, registerSendSilentContext, registerSendTextAndRespond, registerReloadPlugins, notifyLearningLanguage } from "../lib/session-bridge";
+import { registerSendImage, registerSendText, registerScreenTarget, registerSendSilentContext, registerSendTextAndRespond, registerSendAudioClip, registerReloadPlugins, notifyLearningLanguage } from "../lib/session-bridge";
 import { loadAllPlugins } from "../lib/plugin-loader";
 import type { FunctionTool } from "@openai/agents/realtime";
 
@@ -528,12 +528,31 @@ export function useRealtime(): UseRealtimeReturn {
       session.transport.sendEvent({ type: "response.create" });
     });
 
+    // Inject PCM16 audio clips directly into the session so the model can hear
+    // system audio (anime, games, videos) rather than just reading transcripts.
+    registerSendAudioClip((pcmBase64: string, contextText?: string) => {
+      const content: Array<Record<string, string>> = [];
+      if (contextText) {
+        content.push({ type: "input_text", text: contextText });
+      }
+      content.push({ type: "input_audio", audio: pcmBase64 });
+      session.transport.sendEvent({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content,
+        },
+      });
+    });
+
     return () => {
       registerSendImage(null);
       registerSendText(null);
       registerScreenTarget(null);
       registerSendSilentContext(null);
       registerSendTextAndRespond(null);
+      registerSendAudioClip(null);
       registerReloadPlugins(null);
       stopKeepalive();
       session.close();

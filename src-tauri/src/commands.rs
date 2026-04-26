@@ -1360,6 +1360,8 @@ pub struct AudioCheckResult {
     pub transcript: Option<String>,
     pub hint: Option<String>,
     pub clip_path: Option<String>,
+    /// Base64-encoded PCM16 24kHz mono audio for direct Realtime API injection
+    pub pcm_audio_base64: Option<String>,
 }
 
 
@@ -1737,10 +1739,36 @@ pub async fn stop_learning_audio() -> Result<(), String> {
     Ok(())
 }
 
+/// Convert an m4a file to PCM16 24kHz mono base64 for Realtime API injection.
+fn convert_to_pcm_base64(m4a_path: &str) -> Option<String> {
+    let pcm_path = format!("{m4a_path}.pcm");
+    let output = Command::new("ffmpeg")
+        .args([
+            "-y", "-i", m4a_path,
+            "-ar", "24000",   // 24kHz sample rate (Realtime API requirement)
+            "-ac", "1",       // mono
+            "-f", "s16le",    // PCM 16-bit little-endian
+            &pcm_path,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let pcm_data = fs::read(&pcm_path).ok()?;
+    let _ = fs::remove_file(&pcm_path);
+    if pcm_data.is_empty() {
+        return None;
+    }
+    Some(base64::engine::general_purpose::STANDARD.encode(&pcm_data))
+}
+
 /// Stop recorder, transcribe accumulated audio, restart recorder, return hints.
 #[tauri::command]
 pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, String> {
-    let empty = AudioCheckResult { transcript: None, hint: None, clip_path: None };
+    let empty = AudioCheckResult { transcript: None, hint: None, clip_path: None, pcm_audio_base64: None };
 
     let config = read_config_internal()?;
     let api_key = config.api_key.ok_or("No API key")?;
@@ -1798,6 +1826,12 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
         ])
         .output()
         .map_err(|e| format!("curl: {e}"))?;
+
+    // Convert to PCM16 24kHz base64 before deleting — for direct Realtime API injection
+    let pcm_base64 = convert_to_pcm_base64(LEARNING_AUDIO_PATH);
+    if pcm_base64.is_some() {
+        eprintln!("[learning-audio] converted to PCM16 24kHz for realtime injection");
+    }
 
     // Save clip to flashcards dir before deleting — we may need it for a flashcard
     let saved_clip_path = crate::flashcards::save_audio_clip(LEARNING_AUDIO_PATH);
@@ -1931,6 +1965,7 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
             transcript: Some(transcript),
             hint: None,
             clip_path: saved_clip_path,
+            pcm_audio_base64: pcm_base64,
         });
     }
 
@@ -1962,6 +1997,7 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
         transcript: Some(transcript),
         hint: hint_val,
         clip_path: saved_clip_path,
+        pcm_audio_base64: pcm_base64,
     })
 }
 

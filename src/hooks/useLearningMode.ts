@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { registerLearningLanguage, sendTextAndRespond, sendSilentContext } from "../lib/session-bridge";
+import { registerLearningLanguage, sendTextAndRespond, sendSilentContext, sendAudioClip } from "../lib/session-bridge";
 import type { ConnectionStatus } from "./useRealtime";
 import type { VocabCardMode } from "../hooks/useUIPreferences";
 
@@ -13,6 +13,7 @@ interface AudioCheckResult {
   transcript: string | null;
   hint: string | null;
   clip_path: string | null;
+  pcm_audio_base64: string | null;
 }
 
 export interface UseLearningModeReturn {
@@ -108,7 +109,7 @@ export function useLearningMode(
       checkInFlightRef.current = true;
 
       try {
-        const noAudio: AudioCheckResult = { transcript: null, hint: null, clip_path: null };
+        const noAudio: AudioCheckResult = { transcript: null, hint: null, clip_path: null, pcm_audio_base64: null };
         const [audioResult, screenHint] = await Promise.all([
           audioListenRef.current
             ? invoke<AudioCheckResult>("check_learning_audio", { language }).catch(() => noAudio)
@@ -123,12 +124,33 @@ export function useLearningMode(
           invoke("append_transcript_window", { text: audioResult.transcript }).catch(() => {});
         }
 
-        // Inject ONE combined silent context (replaces the previous one to keep
-        // conversation lean — avoids flooding the Realtime session with dozens of
-        // background messages that make the model unresponsive).
+        // Inject the raw audio clip directly into the Realtime session so
+        // Samuel can actually hear the anime/game/video audio, not just
+        // read a text transcript. This dramatically improves comprehension.
+        if (audioResult.pcm_audio_base64) {
+          sendAudioClip(
+            audioResult.pcm_audio_base64,
+            `[System: This is ambient ${language} audio from the user's speakers.]`,
+          );
+        }
+
+        // When the backend found something interesting, have Samuel speak
+        // the hint to the user. This is the main teaching moment.
+        if (audioResult.hint) {
+          sendTextAndRespond(
+            `[System: You just heard ${language} audio from the user's speakers. ` +
+            `Here is an analysis of what was said. Share the most interesting point ` +
+            `with the user in 1-2 brief sentences, as if you heard it yourself. ` +
+            `Be natural and conversational — don't say "the analysis says" or ` +
+            `"according to the transcript". Just teach the vocabulary directly.\n\n` +
+            `Analysis: ${audioResult.hint}]`,
+          );
+        }
+
+        // Inject text context for screen + transcript as silent background
         const contextParts: string[] = [];
         if (audioResult.transcript) {
-          contextParts.push(`Audio: "${audioResult.transcript}"`);
+          contextParts.push(`Audio transcript: "${audioResult.transcript}"`);
         }
         if (screenHint && !screenHint.startsWith("NONE")) {
           contextParts.push(`Screen: "${screenHint}"`);
