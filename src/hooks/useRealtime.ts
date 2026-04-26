@@ -227,8 +227,21 @@ export function useRealtime(): UseRealtimeReturn {
       }
     });
 
-    session.on("agent_tool_start", () => setAgentState("thinking"));
-    session.on("agent_tool_end", () => setAgentState("listening"));
+    let toolTimeoutId: ReturnType<typeof setTimeout> | null = null;
+    session.on("agent_tool_start", () => {
+      setAgentState("thinking");
+      // Safety net: if a tool hangs for >30s, recover the UI
+      if (toolTimeoutId) clearTimeout(toolTimeoutId);
+      toolTimeoutId = setTimeout(() => {
+        console.warn("[session] tool timeout — recovering from stuck thinking state");
+        setAgentState("listening");
+        responseInProgressRef.current = false;
+      }, 30_000);
+    });
+    session.on("agent_tool_end", () => {
+      if (toolTimeoutId) { clearTimeout(toolTimeoutId); toolTimeoutId = null; }
+      setAgentState("listening");
+    });
 
     session.on("error", (error: unknown) => {
       console.error("[session] error:", error);
@@ -386,6 +399,21 @@ export function useRealtime(): UseRealtimeReturn {
                 startInactivityTimer();
               }
             }, unmuteDelay);
+          }
+          break;
+        }
+
+        case "response.cancelled": {
+          // User interrupted mid-tool or mid-speech — reset state so UI
+          // doesn't stay stuck on "thinking/working"
+          responseInProgressRef.current = false;
+          setAgentState("listening");
+          if (!userMutedRef.current && session.muted === true) {
+            setTimeout(() => {
+              if (!userMutedRef.current && sessionRef.current) {
+                try { sessionRef.current.mute(false); } catch {}
+              }
+            }, 500);
           }
           break;
         }

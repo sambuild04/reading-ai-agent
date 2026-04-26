@@ -124,23 +124,17 @@ export function useLearningMode(
           invoke("append_transcript_window", { text: audioResult.transcript }).catch(() => {});
         }
 
-        // Build combined context: audio (raw + transcript + hint) + screen
+        // NOTE: We intentionally do NOT inject raw PCM audio into the Realtime
+        // session. The model treats input_audio as user speech, which confuses
+        // it about the user's language (English mic vs Japanese anime audio).
+        // Instead we use text transcripts + hints as silent context.
         const contextParts: string[] = [];
 
-        // Inject raw PCM audio so Samuel can actually hear the system audio.
-        // This is silent — Samuel stores it as context but doesn't auto-speak.
-        if (audioResult.pcm_audio_base64) {
-          sendAudioClip(
-            audioResult.pcm_audio_base64,
-            `[System: Ambient ${language} audio from speakers. Store silently — do NOT speak unless asked.]`,
-          );
-        }
-
         if (audioResult.transcript) {
-          contextParts.push(`Audio: "${audioResult.transcript}"`);
+          contextParts.push(`Audio heard from speakers: "${audioResult.transcript}"`);
         }
         if (audioResult.hint) {
-          contextParts.push(`Vocab hint: ${audioResult.hint}`);
+          contextParts.push(`Vocab note: ${audioResult.hint}`);
         }
         if (screenHint && !screenHint.startsWith("NONE")) {
           contextParts.push(`Screen: "${screenHint}"`);
