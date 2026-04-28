@@ -9,7 +9,16 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::memory;
-use crate::teach::extract_html_tag;
+
+/// Extract content between opening and closing HTML tags (e.g. `<title>...</title>`).
+fn extract_html_tag(html: &str, tag: &str) -> Option<String> {
+    let open = format!("<{}", tag);
+    let close = format!("</{}>", tag);
+    let start = html.find(&open)?;
+    let after_open = html[start..].find('>')? + start + 1;
+    let end = html[after_open..].find(&close)? + after_open;
+    Some(html[after_open..end].trim().to_string())
+}
 
 /// Safe UTF-8 truncation — never slices in the middle of a multi-byte character.
 fn truncate_str(s: &str, max_bytes: usize) -> &str {
