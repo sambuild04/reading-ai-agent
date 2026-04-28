@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { RealtimeAgent, RealtimeSession } from "@openai/agents/realtime";
+import { RealtimeAgent, RealtimeSession, OpenAIRealtimeWebRTC } from "@openai/agents/realtime";
 import { samuelAgent } from "../lib/samuel";
-import { registerSendImage, registerSendText, registerScreenTarget, registerSendSilentContext, registerSendTextAndRespond, registerSendAudioClip, registerReloadPlugins, notifyLearningLanguage } from "../lib/session-bridge";
+import { registerSendImage, registerSendText, registerScreenTarget, registerSendSilentContext, registerSendTextAndRespond, registerSendAudioClip, registerReloadPlugins, notifyLearningLanguage, registerSetVolume } from "../lib/session-bridge";
 import { loadAllPlugins } from "../lib/plugin-loader";
 import type { FunctionTool } from "@openai/agents/realtime";
 
@@ -181,8 +181,20 @@ export function useRealtime(): UseRealtimeReturn {
     }
   }, []);
 
+  // Managed audio element for Samuel's voice output — allows volume control
+  const audioElementRef = useRef<HTMLAudioElement | null>(null);
+  if (!audioElementRef.current) {
+    audioElementRef.current = document.createElement("audio");
+    audioElementRef.current.autoplay = true;
+  }
+
   useEffect(() => {
+    const transport = new OpenAIRealtimeWebRTC({
+      audioElement: audioElementRef.current!,
+    });
+
     const session = new RealtimeSession(samuelAgent, {
+      transport,
       model: "gpt-realtime",
       config: {
         audio: {
@@ -207,6 +219,13 @@ export function useRealtime(): UseRealtimeReturn {
     });
 
     sessionRef.current = session;
+
+    // Register volume control so tools/preferences can adjust Samuel's voice
+    registerSetVolume((pct: number) => {
+      if (audioElementRef.current) {
+        audioElementRef.current.volume = Math.max(0, Math.min(1, pct / 100));
+      }
+    });
 
     // Auto-mute mic while Samuel speaks to prevent echo feedback in WKWebView.
     // Mic stays muted until response.done + delay (not audio_stopped) so the

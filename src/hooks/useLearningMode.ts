@@ -16,6 +16,19 @@ interface AudioCheckResult {
   pcm_audio_base64: string | null;
 }
 
+interface WatchCheckMatch {
+  id: string;
+  description: string;
+  message_template: string;
+}
+
+interface ClassifierMatch {
+  watch_id: string;
+  description: string;
+  message_template: string;
+  detail: string;
+}
+
 export interface UseLearningModeReturn {
   learningLanguage: string | null;
   learningActive: boolean;
@@ -140,53 +153,73 @@ export function useLearningMode(
           contextParts.push(`Screen: "${screenHint}"`);
         }
 
-        // Check active watches against new content and notify user on match
-        const watchTexts: string[] = [];
-        if (audioResult.transcript) watchTexts.push(audioResult.transcript);
-        if (audioResult.hint) watchTexts.push(audioResult.hint);
-        if (screenHint && !screenHint.startsWith("NONE")) watchTexts.push(screenHint);
-        if (watchTexts.length > 0) {
-          const combined = watchTexts.join(" ");
-          const [audioMatches, screenMatches] = await Promise.all([
-            audioResult.transcript
-              ? invoke<string[]>("watch_check", { text: audioResult.transcript, source: "audio" }).catch(() => [])
-              : Promise.resolve([]),
-            screenHint && !screenHint.startsWith("NONE")
-              ? invoke<string[]>("watch_check", { text: screenHint, source: "screen" }).catch(() => [])
-              : Promise.resolve([]),
+        // ── Watcher Loop (ambient agent) ─────────────────────────────
+        // Evaluate all active triggers against new content.
+        // Keyword triggers: deterministic, evaluated in Rust.
+        // Classifier triggers: GPT-4o-mini, evaluated in Rust.
+        // Matches fire via sendTextAndRespond (synthetic turn injection).
+
+        const audioText = audioResult.transcript || "";
+        const screenText = screenHint && !screenHint.startsWith("NONE") ? screenHint : "";
+        const hasContent = audioText || screenText;
+
+        if (hasContent) {
+          const triggerMessages: string[] = [];
+
+          // Tier 1: keyword triggers (microseconds, free)
+          const [audioKw, screenKw] = await Promise.all([
+            audioText
+              ? invoke<WatchCheckMatch[]>("watch_check", { text: audioText, source: "audio" }).catch(() => [] as WatchCheckMatch[])
+              : Promise.resolve([] as WatchCheckMatch[]),
+            screenText
+              ? invoke<WatchCheckMatch[]>("watch_check", { text: screenText, source: "screen" }).catch(() => [] as WatchCheckMatch[])
+              : Promise.resolve([] as WatchCheckMatch[]),
           ]);
-          const allMatches = [...new Set([...audioMatches, ...screenMatches])];
-          if (allMatches.length > 0) {
-            const matchList = allMatches.join("; ");
-            console.log(`[watch] triggered: ${matchList}`);
+          const seenIds = new Set<string>();
+          for (const m of [...audioKw, ...screenKw]) {
+            if (seenIds.has(m.id)) continue;
+            seenIds.add(m.id);
+            const msg = m.message_template || m.description;
+            triggerMessages.push(msg);
+          }
+
+          // Tier 2: classifier triggers (GPT-4o-mini, ~$0.0001/call)
+          const combined = [audioText, screenText].filter(Boolean).join("\n");
+          const [audioClassifier, screenClassifier] = await Promise.all([
+            audioText
+              ? invoke<ClassifierMatch[]>("watch_evaluate_classifier", { content: audioText, source: "audio" }).catch(() => [] as ClassifierMatch[])
+              : Promise.resolve([] as ClassifierMatch[]),
+            screenText
+              ? invoke<ClassifierMatch[]>("watch_evaluate_classifier", { content: screenText, source: "screen" }).catch(() => [] as ClassifierMatch[])
+              : Promise.resolve([] as ClassifierMatch[]),
+          ]);
+          for (const m of [...audioClassifier, ...screenClassifier]) {
+            if (seenIds.has(m.watch_id)) continue;
+            seenIds.add(m.watch_id);
+            const msg = m.message_template
+              ? m.message_template.replace("{detail}", m.detail)
+              : `${m.description}: ${m.detail}`;
+            triggerMessages.push(msg);
+          }
+
+          // Fire all matched triggers as a single synthetic turn
+          if (triggerMessages.length > 0) {
+            console.log(`[watcher] ${triggerMessages.length} trigger(s) fired`);
             sendTextAndRespond(
-              `[System: WATCH ALERT — The following watches matched just now: ${matchList}. ` +
-              `Context: ${combined}. ` +
-              `Briefly notify the user about what you detected. Be specific about what you saw/heard ` +
-              `and why it matches their watch. Keep it short — 1-2 sentences.]`,
+              `[TRIGGER ALERT] The following watches just matched:\n` +
+              triggerMessages.map((m, i) => `${i + 1}. ${m}`).join("\n") +
+              `\n\nContext: ${combined}\n\n` +
+              `Briefly notify the user about what you detected. Be specific. Keep it to 1-2 sentences per trigger.`,
             );
           }
         }
 
+        // Passive ambient context (no watch evaluation here — that's the watcher loop above)
         if (contextParts.length > 0) {
-          // Include active judgment-based watches so Samuel can evaluate them
-          const watches = await invoke<Array<{ id: string; description: string; keywords: string[] }>>(
-            "watch_list",
-          ).catch(() => []);
-          const judgmentWatches = watches.filter((w) => w.keywords.length === 0);
-          let watchNote = "";
-          if (judgmentWatches.length > 0) {
-            const descs = judgmentWatches.map((w) => w.description).join("; ");
-            watchNote =
-              ` ACTIVE WATCHES (use your judgment): ${descs}. ` +
-              `If the ambient context matches any watch, proactively notify the user.`;
-          }
-
           const contextMsg = contextParts.join(" | ");
           sendSilentContext(
             `[System: Ambient context — ${contextMsg}. ` +
-            `You are passively listening. Do NOT interrupt the user unless a watch triggers. ` +
-            `Only share vocabulary hints when the user asks or during scheduled review.${watchNote}]`,
+            `You are passively listening. Do not speak unless prompted by the user or a trigger alert.]`,
           );
           contextBufferRef.current.push(contextMsg);
           if (contextBufferRef.current.length > 15) {

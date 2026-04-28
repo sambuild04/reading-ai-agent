@@ -13,6 +13,7 @@ type SendSilentContextFn = (text: string) => void;
 type SendTextAndRespondFn = (text: string) => void;
 type SendAudioClipFn = (pcmBase64: string, contextText?: string) => void;
 type UIUpdateFn = (component: string, property: string, value: string) => string;
+type SetVolumeFn = (pct: number) => void;
 
 /** Shared content line type used by lyrics, song teaching, etc. */
 export interface ContentLine {
@@ -30,6 +31,17 @@ let sendSilentContextFn: SendSilentContextFn | null = null;
 let sendTextAndRespondFn: SendTextAndRespondFn | null = null;
 let sendAudioClipFn: SendAudioClipFn | null = null;
 let uiUpdateFn: UIUpdateFn | null = null;
+let setVolumeFn: SetVolumeFn | null = null;
+
+export function registerSetVolume(fn: SetVolumeFn | null) {
+  setVolumeFn = fn;
+}
+
+export function setVolume(pct: number): boolean {
+  if (!setVolumeFn) return false;
+  setVolumeFn(pct);
+  return true;
+}
 
 export function registerSendImage(fn: SendImageFn | null) {
   sendImageFn = fn;

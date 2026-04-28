@@ -192,6 +192,23 @@ pub async fn capture_active_window(app_name: Option<String>) -> Result<CaptureRe
     capture_focused_window(app_name)
 }
 
+/// Set macOS system volume (0-100).
+#[tauri::command]
+pub async fn set_system_volume(volume: u32) -> Result<(), String> {
+    let vol = volume.min(100);
+    // macOS volume range is 0-100 via osascript
+    let script = format!("set volume output volume {vol}");
+    let output = Command::new("/usr/bin/osascript")
+        .args(["-e", &script])
+        .output()
+        .map_err(|e| format!("osascript: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("osascript error: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    eprintln!("[volume] system volume set to {vol}%");
+    Ok(())
+}
+
 /// Capture a screenshot only if the screen has changed since the last capture.
 /// Used for auto-injecting fresh screenshots when the user speaks, so the model
 /// always sees the current screen without wasting tokens on identical images.
@@ -1191,6 +1208,122 @@ pub async fn check_screen_for_language(language: String) -> Result<Option<String
         .to_string();
 
     eprintln!("[learning-mode] screen check result: {}", truncate_str(&text, 100));
+
+    if text == "NONE" || text.to_uppercase().starts_with("NONE") {
+        Ok(None)
+    } else {
+        Ok(Some(text))
+    }
+}
+
+// ── Generic screen text extraction for watcher loop ──────────────────────────
+
+/// Screen state for the general watcher (separate from language-learning screen state).
+static WATCHER_SCREEN_STATE: Mutex<Option<ScreenState>> = Mutex::new(None);
+
+/// Capture the screen and extract a brief text description of visible content.
+/// Used by the standalone watcher loop when learning mode is off.
+/// Returns None if screen hasn't changed or is empty.
+#[tauri::command]
+pub async fn check_screen_text() -> Result<Option<String>, String> {
+    let config = read_config_internal()?;
+    let api_key = config.api_key.ok_or("No API key configured")?;
+
+    let capture = capture_focused_window(None)?;
+    let b64 = &capture.base64;
+    if b64.len() < 100 {
+        return Ok(None);
+    }
+
+    let current_hash = hash_bytes(b64.as_bytes());
+    let current_app = get_frontmost_app_name();
+    {
+        let mut state = WATCHER_SCREEN_STATE.lock().unwrap();
+        if let Some(ref prev) = *state {
+            let same_hash = prev.last_hash == current_hash;
+            let same_app = prev.last_app == current_app;
+            let recent = prev.last_analysis.elapsed().as_secs() < 90;
+            if same_hash && same_app && recent {
+                return Ok(None);
+            }
+        }
+        *state = Some(ScreenState {
+            last_hash: current_hash,
+            last_app: current_app.clone(),
+            last_analysis: Instant::now(),
+        });
+    }
+
+    let request_body = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "messages": [
+            {
+                "role": "system",
+                "content": "Describe the visible text and key visual content on this screenshot in 2-3 sentences. \
+                             Focus on readable text (titles, labels, subtitles, messages, code). \
+                             Be factual and concise. If the screen is a plain desktop or has no meaningful content, say NONE."
+            },
+            {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "What text and content is visible on this screen?" },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:image/jpeg;base64,{b64}"),
+                            "detail": "low"
+                        }
+                    }
+                ]
+            }
+        ],
+        "max_tokens": 200
+    });
+
+    let body_str = serde_json::to_string(&request_body)
+        .map_err(|e| format!("JSON error: {e}"))?;
+    let body_path = "/tmp/samuel-watcher-screen-req.json";
+    fs::write(body_path, &body_str)
+        .map_err(|e| format!("Write request: {e}"))?;
+
+    let output = Command::new("/usr/bin/curl")
+        .args([
+            "-s",
+            "--max-time", "10",
+            "-X", "POST",
+            "https://api.openai.com/v1/chat/completions",
+            "-H", &format!("Authorization: Bearer {api_key}"),
+            "-H", "Content-Type: application/json",
+            "--data-binary", &format!("@{body_path}"),
+        ])
+        .output()
+        .map_err(|e| format!("Vision API: {e}"))?;
+
+    let _ = fs::remove_file(body_path);
+
+    if !output.status.success() {
+        return Err(format!("curl failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+
+    let response_str = String::from_utf8_lossy(&output.stdout).to_string();
+    if response_str.is_empty() {
+        return Ok(None);
+    }
+
+    let response: serde_json::Value = serde_json::from_str(&response_str)
+        .map_err(|e| format!("Parse response: {e}"))?;
+
+    if response.get("error").is_some() {
+        return Ok(None);
+    }
+
+    let text = response["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("NONE")
+        .trim()
+        .to_string();
+
+    eprintln!("[watcher] screen text: {}", truncate_str(&text, 100));
 
     if text == "NONE" || text.to_uppercase().starts_with("NONE") {
         Ok(None)
@@ -2716,4 +2849,120 @@ pub async fn skill_delete(id: String) -> Result<String, String> {
     fs::remove_file(&path).map_err(|e| format!("Delete skill {safe}: {e}"))?;
     eprintln!("[skills] deleted {safe}");
     Ok(format!("Deleted skill: {safe}"))
+}
+
+// ── Watcher Loop: classifier evaluation ─────────────────────────────────────
+
+/// Result from GPT-4o-mini classifier evaluation of a single watch trigger.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ClassifierMatch {
+    pub watch_id: String,
+    pub description: String,
+    pub message_template: String,
+    /// The specific finding from the classifier
+    pub detail: String,
+}
+
+/// Evaluate classifier-type watches against content using GPT-4o-mini.
+/// Batches all eligible classifier watches into one LLM call for efficiency.
+/// Returns only triggers that fire.
+#[tauri::command]
+pub async fn watch_evaluate_classifier(
+    content: String,
+    source: String,
+) -> Result<Vec<ClassifierMatch>, String> {
+    let watches = memory::get_classifier_watches(&source);
+    if watches.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let config = read_config_internal()?;
+    let api_key = config.api_key.ok_or("No API key")?;
+
+    let watch_specs: Vec<String> = watches
+        .iter()
+        .enumerate()
+        .map(|(i, w)| format!("  {}. [id={}] {}", i + 1, w.id, w.description))
+        .collect();
+
+    let system_prompt = format!(
+        "You are a trigger evaluator. Given content from {source}, decide which triggers fire.\n\
+         Active triggers:\n{}\n\n\
+         For each trigger that matches the content, output ONE JSON object per line:\n\
+         {{\"id\": \"<watch_id>\", \"detail\": \"<brief explanation of what matched>\"}}\n\n\
+         If NO trigger matches, output exactly: NONE\n\
+         Be conservative — only fire when there's a clear match. Do not explain further.",
+        watch_specs.join("\n")
+    );
+
+    let body = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "max_tokens": 300,
+        "temperature": 0.0,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": content }
+        ]
+    });
+
+    let output = Command::new("/usr/bin/curl")
+        .args([
+            "-s",
+            "--max-time", "8",
+            "-X", "POST",
+            "https://api.openai.com/v1/chat/completions",
+            "-H", &format!("Authorization: Bearer {api_key}"),
+            "-H", "Content-Type: application/json",
+            "-d", &body.to_string(),
+        ])
+        .output()
+        .map_err(|e| format!("Classifier call failed: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("[watch-classifier] error: {stderr}");
+        return Ok(vec![]);
+    }
+
+    let resp: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
+        .map_err(|e| format!("Parse classifier response: {e}"))?;
+
+    let text = resp["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("NONE")
+        .trim()
+        .to_string();
+
+    eprintln!("[watch-classifier] raw response: {text}");
+
+    if text == "NONE" || text.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let watch_map: std::collections::HashMap<String, &memory::WatchAlert> =
+        watches.iter().map(|w| (w.id.clone(), w)).collect();
+
+    let mut results = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line == "NONE" {
+            continue;
+        }
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+            if let (Some(id), Some(detail)) = (val["id"].as_str(), val["detail"].as_str()) {
+                if let Some(watch) = watch_map.get(id) {
+                    memory::mark_watch_fired(id);
+                    results.push(ClassifierMatch {
+                        watch_id: id.to_string(),
+                        description: watch.description.clone(),
+                        message_template: watch.message_template.clone(),
+                        detail: detail.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    eprintln!("[watch-classifier] {} triggers fired", results.len());
+    Ok(results)
 }

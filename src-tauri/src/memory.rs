@@ -30,25 +30,48 @@ pub struct WatchEntry {
     pub total_minutes: u32,
 }
 
-/// An active alert: something Samuel is watching for in audio or on screen.
+/// An active trigger: something Samuel watches for in audio or on screen.
+/// Triggers are first-class objects with their own evaluation logic,
+/// separate from the conversation loop (ambient agent architecture).
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WatchAlert {
     pub id: String,
     pub description: String,
-    /// Specific keywords/patterns to match (lowercase). Empty = rely on LLM judgment.
+    /// "keyword" = fast string match, "classifier" = GPT-4o-mini per event
+    #[serde(default = "default_condition_type")]
+    pub condition_type: String,
+    /// For "keyword" type: specific words/phrases to match (lowercase)
     #[serde(default)]
     pub keywords: Vec<String>,
     /// "audio", "screen", or "both"
     #[serde(default = "default_watch_source")]
     pub source: String,
+    /// Template for what Samuel says when trigger fires
+    #[serde(default)]
+    pub message_template: String,
     pub created_at: u64,
     /// How many times this alert has fired
     #[serde(default)]
     pub fire_count: u32,
+    /// Seconds between repeated firings (prevents spam)
+    #[serde(default = "default_cooldown")]
+    pub cooldown_secs: u64,
+    /// Unix timestamp of last fire (0 = never)
+    #[serde(default)]
+    pub last_fired_at: u64,
+    pub enabled: bool,
 }
 
 fn default_watch_source() -> String {
     "both".to_string()
+}
+
+fn default_condition_type() -> String {
+    "keyword".to_string()
+}
+
+fn default_cooldown() -> u64 {
+    30
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -342,16 +365,28 @@ pub fn get_recent_corrections() -> Vec<String> {
 
 const MAX_WATCHES: usize = 20;
 
-pub fn add_watch(description: &str, keywords: Vec<String>, source: &str) -> String {
+pub fn add_watch(
+    description: &str,
+    condition_type: &str,
+    keywords: Vec<String>,
+    source: &str,
+    message_template: &str,
+    cooldown_secs: u64,
+) -> String {
     let id = format!("w_{}", now_secs());
     with_memory(|mem| {
         mem.active_watches.push(WatchAlert {
             id: id.clone(),
             description: description.to_string(),
+            condition_type: condition_type.to_string(),
             keywords: keywords.iter().map(|k| k.to_lowercase()).collect(),
             source: source.to_string(),
+            message_template: message_template.to_string(),
             created_at: now_secs(),
             fire_count: 0,
+            cooldown_secs,
+            last_fired_at: 0,
+            enabled: true,
         });
         if mem.active_watches.len() > MAX_WATCHES {
             mem.active_watches.remove(0);
@@ -376,53 +411,99 @@ pub fn clear_watches() {
     with_memory(|mem| mem.active_watches.clear());
 }
 
-/// Check text (audio transcript or screen content) against active watches.
-/// Returns list of (watch_id, description) for any that match by keyword.
-pub fn check_watches_keyword(text: &str, source: &str) -> Vec<(String, String)> {
+/// Check text against active keyword-type watches that are not in cooldown.
+/// Returns list of (watch_id, description, message_template) for matches.
+pub fn check_watches_keyword(text: &str, source: &str) -> Vec<(String, String, String)> {
     let lower = text.to_lowercase();
+    let now = now_secs();
     with_memory(|mem| {
         let mut matches = Vec::new();
         for watch in &mut mem.active_watches {
+            if !watch.enabled {
+                continue;
+            }
             if watch.source != "both" && watch.source != source {
                 continue;
             }
-            if watch.keywords.is_empty() {
+            if watch.condition_type != "keyword" || watch.keywords.is_empty() {
+                continue;
+            }
+            if watch.last_fired_at > 0 && now - watch.last_fired_at < watch.cooldown_secs {
                 continue;
             }
             let hit = watch.keywords.iter().any(|kw| lower.contains(kw));
             if hit {
                 watch.fire_count += 1;
-                matches.push((watch.id.clone(), watch.description.clone()));
+                watch.last_fired_at = now;
+                matches.push((watch.id.clone(), watch.description.clone(), watch.message_template.clone()));
             }
         }
         matches
     })
 }
 
+/// Get classifier-type watches that are eligible to fire (not in cooldown).
+pub fn get_classifier_watches(source: &str) -> Vec<WatchAlert> {
+    let now = now_secs();
+    with_memory(|mem| {
+        mem.active_watches
+            .iter()
+            .filter(|w| {
+                w.enabled
+                    && w.condition_type == "classifier"
+                    && (w.source == "both" || w.source == source)
+                    && (w.last_fired_at == 0 || now - w.last_fired_at >= w.cooldown_secs)
+            })
+            .cloned()
+            .collect()
+    })
+}
+
+/// Mark a watch as having just fired (updates last_fired_at and fire_count).
+pub fn mark_watch_fired(id: &str) {
+    with_memory(|mem| {
+        if let Some(w) = mem.active_watches.iter_mut().find(|w| w.id == id) {
+            w.fire_count += 1;
+            w.last_fired_at = now_secs();
+        }
+    });
+}
+
 /// Get active watches formatted for LLM context injection.
 pub fn get_watches_context() -> Option<String> {
     let watches = list_watches();
-    if watches.is_empty() {
+    let enabled: Vec<&WatchAlert> = watches.iter().filter(|w| w.enabled).collect();
+    if enabled.is_empty() {
         return None;
     }
-    let lines: Vec<String> = watches
+    let lines: Vec<String> = enabled
         .iter()
         .map(|w| {
-            let kw = if w.keywords.is_empty() {
-                "any match".to_string()
+            let cond = if w.condition_type == "keyword" {
+                format!("keywords: {}", w.keywords.join(", "))
             } else {
-                w.keywords.join(", ")
+                "classifier (LLM judgment)".to_string()
             };
-            format!("- [{}] {} (keywords: {}, source: {})", w.id, w.description, kw, w.source)
+            format!(
+                "- [{}] {} ({}, source: {}, cooldown: {}s, fired: {}x)",
+                w.id, w.description, cond, w.source, w.cooldown_secs, w.fire_count
+            )
         })
         .collect();
     Some(format!("Active watches:\n{}", lines.join("\n")))
 }
 
 #[tauri::command]
-pub async fn watch_add(description: String, keywords: Vec<String>, source: String) -> Result<String, String> {
-    let id = add_watch(&description, keywords, &source);
-    eprintln!("[watch] added: {id} — {description}");
+pub async fn watch_add(
+    description: String,
+    condition_type: String,
+    keywords: Vec<String>,
+    source: String,
+    message_template: String,
+    cooldown_secs: u64,
+) -> Result<String, String> {
+    let id = add_watch(&description, &condition_type, keywords, &source, &message_template, cooldown_secs);
+    eprintln!("[watch] added trigger: {id} — {description} (type={condition_type}, cooldown={cooldown_secs}s)");
     Ok(id)
 }
 
@@ -445,13 +526,37 @@ pub async fn watch_clear() -> Result<(), String> {
     Ok(())
 }
 
-/// Check text against active watches (called from frontend learning loop).
-/// Returns matched watch descriptions to trigger notifications.
+/// Keyword-check text against active keyword-type watches.
+/// Returns matched (id, description, message_template) for each hit.
 #[tauri::command]
-pub async fn watch_check(text: String, source: String) -> Result<Vec<String>, String> {
+pub async fn watch_check(text: String, source: String) -> Result<Vec<WatchCheckMatch>, String> {
     let matches = check_watches_keyword(&text, &source);
-    let descriptions: Vec<String> = matches.into_iter().map(|(_, desc)| desc).collect();
-    Ok(descriptions)
+    Ok(matches
+        .into_iter()
+        .map(|(id, desc, template)| WatchCheckMatch { id, description: desc, message_template: template })
+        .collect())
+}
+
+/// A single keyword-match result returned to the frontend.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WatchCheckMatch {
+    pub id: String,
+    pub description: String,
+    pub message_template: String,
+}
+
+/// Get classifier-type watches eligible to fire for this source.
+#[tauri::command]
+pub async fn watch_get_classifier(source: String) -> Result<Vec<WatchAlert>, String> {
+    Ok(get_classifier_watches(&source))
+}
+
+/// Mark a watch as fired (called after successful synthetic turn injection).
+#[tauri::command]
+pub async fn watch_mark_fired(id: String) -> Result<(), String> {
+    mark_watch_fired(&id);
+    eprintln!("[watch] trigger fired: {id}");
+    Ok(())
 }
 
 #[tauri::command]

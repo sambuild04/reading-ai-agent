@@ -6,6 +6,7 @@ import { useRealtime } from "./hooks/useRealtime";
 import { useWakeWord } from "./hooks/useWakeWord";
 import { useRecordMode } from "./hooks/useRecordMode";
 import { useLearningMode } from "./hooks/useLearningMode";
+import { useWatcherLoop } from "./hooks/useWatcherLoop";
 import { useAudioPlayer } from "./hooks/useAudioPlayer";
 import { useSongPlayback } from "./hooks/useSongTeaching";
 import { useUIPreferences } from "./hooks/useUIPreferences";
@@ -18,7 +19,7 @@ import { TeachDrop } from "./components/TeachDrop";
 import { PluginApproval } from "./components/PluginApproval";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { LyricsViewer } from "./components/LyricsViewer";
-import { sendTextAndRespond, registerUIUpdate, registerDismissCard, registerSongPlayback, registerShowWordCard, registerSetCardMode, registerToggleLyrics, registerSetLyricsContent, registerUpdateSongLines, registerGetSongMeta } from "./lib/session-bridge";
+import { sendTextAndRespond, registerUIUpdate, registerDismissCard, registerSongPlayback, registerShowWordCard, registerSetCardMode, registerToggleLyrics, registerSetLyricsContent, registerUpdateSongLines, registerGetSongMeta, setVolume } from "./lib/session-bridge";
 import type { ContentLine } from "./lib/session-bridge";
 import type { WordCardData } from "./lib/session-bridge";
 import { registerPrivacyPrefsGetter, registerUIStateGetter } from "./lib/samuel";
@@ -48,6 +49,22 @@ export default function App() {
     ui.prefs["privacy.screen_watch"] as boolean,
     ui.prefs["privacy.audio_listen"] as boolean,
   );
+
+  // Standalone watcher loop: evaluates triggers even when learning mode is off.
+  // Defers to useLearningMode when it's active (avoids double-evaluation).
+  useWatcherLoop(
+    status,
+    agentState,
+    learning.learningActive,
+    ui.prefs["privacy.screen_watch"] as boolean,
+  );
+
+  // Sync Samuel's voice volume with the preference
+  const samuelVolume = ui.prefs["volume.samuel"] as number;
+  useEffect(() => {
+    setVolume(samuelVolume ?? 80);
+  }, [samuelVolume]);
+
   const [songAudioPath, setSongAudioPath] = useState<string | null>(null);
   const [songLines, setSongLines] = useState<ContentLine[] | null>(null);
   const [songTitle, setSongTitle] = useState<string | null>(null);

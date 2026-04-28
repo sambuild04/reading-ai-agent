@@ -1,7 +1,7 @@
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import { z } from "zod";
 import { invoke } from "@tauri-apps/api/core";
-import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, applyUIUpdate, dismissCurrentCard, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, playSongLines, pauseSong, showWordCard, setCardMode, toggleLyricsView, setLyricsContent, updateSongLines, getSongMeta } from "./session-bridge";
+import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, applyUIUpdate, dismissCurrentCard, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, playSongLines, pauseSong, showWordCard, setCardMode, toggleLyricsView, setLyricsContent, updateSongLines, getSongMeta, setVolume } from "./session-bridge";
 import { loadPlugin, triggerRepair, getLastExecution } from "./plugin-loader";
 
 interface CaptureResult {
@@ -213,84 +213,152 @@ const markVocabularyKnownTool = tool({
 });
 
 // ---------------------------------------------------------------------------
+// Volume Control
+// ---------------------------------------------------------------------------
+
+const volumeTool = tool({
+  name: "set_volume",
+  description:
+    "Adjust Samuel's voice output volume. Use when the user says things like " +
+    "'lower your voice', 'speak quieter', 'you're too loud', 'turn up your volume', " +
+    "'speak louder', 'volume 50%', 'be quieter'.\n" +
+    "Also use for macOS system volume when the user says 'turn down the video', " +
+    "'make it quieter', 'lower the system volume'.",
+  parameters: z.object({
+    target: z.enum(["samuel", "system"]).describe(
+      "'samuel' for Samuel's voice output, 'system' for macOS system volume",
+    ),
+    volume: z.number().min(0).max(100).describe("Volume percentage (0-100)"),
+  }),
+  async execute({ target, volume }) {
+    if (target === "samuel") {
+      setVolume(volume);
+      return toolOk(`Voice volume set to ${volume}%.`);
+    }
+    try {
+      await invoke("set_system_volume", { volume });
+      return toolOk(`System volume set to ${volume}%.`);
+    } catch (e) {
+      return toolErr("system_error", `Failed to set system volume: ${e}`);
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Watch / Alert System
 // ---------------------------------------------------------------------------
 
 const watchTool = tool({
   name: "watch_for",
   description:
-    "Set up, remove, or list active watches. Samuel will monitor audio and screen " +
-    "content and proactively notify the user when a match is detected.\n\n" +
+    "Register, remove, or list triggers. Triggers are persistent watches that " +
+    "run in a separate watcher loop, evaluating every audio transcript and screen " +
+    "capture against active triggers. When a trigger fires, you'll be interrupted " +
+    "with a TRIGGER ALERT and should speak to the user.\n\n" +
     "Use when the user says things like:\n" +
-    "- 'Notify me when you see/hear an N1 word'\n" +
+    "- 'Notify me when you see/hear N2 words'\n" +
     "- 'Let me know if you see any error messages'\n" +
     "- 'Watch for the word 妖術'\n" +
     "- 'Alert me when someone mentions price'\n" +
+    "- 'Tell me when the speaker sounds frustrated'\n" +
     "- 'Stop watching for errors'\n" +
     "- 'What are you watching for?'\n\n" +
+    "IMPORTANT — Condition type selection:\n" +
+    "- 'keyword': for specific words/phrases. Cheapest, most reliable. " +
+    "Use when the user wants exact matches: names, specific words, phrases.\n" +
+    "- 'classifier': for fuzzy/semantic conditions. Uses GPT-4o-mini per event. " +
+    "Use when the match requires judgment: 'N2 level words', 'frustrated tone', " +
+    "'important emails', 'security smells'.\n\n" +
     "Actions:\n" +
-    "- 'add': Create a new watch. Provide description and optional keywords.\n" +
-    "- 'remove': Remove a watch by its id.\n" +
-    "- 'list': Show all active watches.\n" +
-    "- 'clear': Remove all watches.",
+    "- 'add': Register a new trigger.\n" +
+    "- 'remove': Remove by id.\n" +
+    "- 'list': Show all active triggers.\n" +
+    "- 'clear': Remove all triggers.",
   parameters: z.object({
-    action: z.enum(["add", "remove", "list", "clear"]).describe("Watch action"),
+    action: z.enum(["add", "remove", "list", "clear"]).describe("Trigger action"),
     description: z
       .string()
       .optional()
-      .describe("For 'add': what to watch for, e.g. 'N1 level Japanese words', 'error messages', 'mentions of price'"),
+      .describe("For 'add': what to watch for"),
+    condition_type: z
+      .enum(["keyword", "classifier"])
+      .optional()
+      .describe("For 'add': 'keyword' for exact match, 'classifier' for LLM judgment"),
     keywords: z
       .array(z.string())
       .optional()
-      .describe(
-        "For 'add': specific words/phrases to match. If empty, uses LLM judgment against the description. " +
-        "e.g. ['妖術', '唯一'] or ['error', 'exception', 'failed']",
-      ),
+      .describe("For 'keyword' type: words/phrases to match. e.g. ['error', 'exception']"),
     source: z
+      .enum(["audio", "screen", "both"])
+      .optional()
+      .describe("For 'add': event source to watch (default: 'both')"),
+    message_template: z
       .string()
       .optional()
-      .describe("For 'add': 'audio', 'screen', or 'both' (default: 'both')"),
-    id: z.string().optional().describe("For 'remove': the watch id to remove"),
+      .describe("For 'add': template for the notification. Use {detail} for classifier findings"),
+    cooldown_secs: z
+      .number()
+      .optional()
+      .describe("For 'add': seconds between repeated firings (default: 30)"),
+    id: z.string().optional().describe("For 'remove': the trigger id"),
   }),
-  async execute({ action, description, keywords, source, id }) {
+  async execute({ action, description, condition_type, keywords, source, message_template, cooldown_secs, id }) {
     switch (action) {
       case "add": {
         if (!description) {
           return toolErr("invalid_input", "Need a description of what to watch for.");
         }
+        const ct = condition_type ?? (keywords?.length ? "keyword" : "classifier");
         const watchId = await invoke<string>("watch_add", {
           description,
+          conditionType: ct,
           keywords: keywords ?? [],
           source: source ?? "both",
+          messageTemplate: message_template ?? "",
+          cooldownSecs: cooldown_secs ?? 30,
         });
-        const kw = keywords?.length ? ` (keywords: ${keywords.join(", ")})` : " (using judgment)";
-        return toolOk(`Watch set: "${description}"${kw}. I'll notify you when I detect this. [id: ${watchId}]`);
+        const typeLabel = ct === "keyword"
+          ? `keyword match: ${keywords?.join(", ")}`
+          : "classifier (LLM judgment)";
+        return toolOk(
+          `Trigger registered: "${description}" (${typeLabel}, cooldown: ${cooldown_secs ?? 30}s). ` +
+          `I'll notify you when this fires. [id: ${watchId}]`,
+        );
       }
       case "remove": {
         if (!id) {
-          return toolErr("invalid_input", "Need the watch id to remove.");
+          return toolErr("invalid_input", "Need the trigger id to remove.");
         }
         const removed = await invoke<boolean>("watch_remove", { id });
         return removed
-          ? toolOk(`Watch ${id} removed.`)
-          : toolErr("not_found", `No watch found with id ${id}.`);
+          ? toolOk(`Trigger ${id} removed.`)
+          : toolErr("not_found", `No trigger found with id ${id}.`);
       }
       case "list": {
-        const watches = await invoke<Array<{ id: string; description: string; keywords: string[]; source: string; fire_count: number }>>(
-          "watch_list",
-        );
+        const watches = await invoke<Array<{
+          id: string;
+          description: string;
+          condition_type: string;
+          keywords: string[];
+          source: string;
+          fire_count: number;
+          cooldown_secs: number;
+          enabled: boolean;
+        }>>("watch_list");
         if (watches.length === 0) {
-          return toolOk("No active watches. Tell me what to watch for!");
+          return toolOk("No active triggers. Tell me what to watch for!");
         }
-        const lines = watches.map(
-          (w) =>
-            `- [${w.id}] ${w.description} (${w.keywords.length ? w.keywords.join(", ") : "judgment"}, ${w.source}, fired ${w.fire_count}x)`,
-        );
-        return toolOk(`Active watches:\n${lines.join("\n")}`);
+        const lines = watches.map((w) => {
+          const type = w.condition_type === "keyword"
+            ? `keyword: ${w.keywords.join(", ")}`
+            : "classifier";
+          return `- [${w.id}] ${w.description} (${type}, ${w.source}, ${w.enabled ? "on" : "off"}, fired ${w.fire_count}x, cooldown ${w.cooldown_secs}s)`;
+        });
+        return toolOk(`Active triggers:\n${lines.join("\n")}`);
       }
       case "clear": {
         await invoke("watch_clear");
-        return toolOk("All watches cleared.");
+        return toolOk("All triggers cleared.");
       }
       default:
         return toolErr("invalid_action", `Unknown action: ${action}`);
@@ -1948,21 +2016,39 @@ WHEN TO SEARCH: When the user asks for something complex, search skills FIRST.
   If a matching skill exists, follow its steps instead of improvising.
 DO NOT save trivial single-tool tasks. Only save multi-step workflows.
 
+## set_volume — Volume control
+Adjust Samuel's voice volume or macOS system volume.
+- target="samuel": Your own voice output (0-100%). Use when user says "speak quieter", "you're too loud", "lower your voice".
+- target="system": macOS system audio (0-100%). Use when user says "turn down the video", "the video is too loud", "lower the volume".
+When asked to be quieter vs louder, pick a reasonable value (e.g. "quieter" → 40%, "louder" → 90%, "a bit quieter" → 60%).
+Confirm the change briefly: "Done, I've lowered my voice to 40%."
+
 ## Memory tools (standalone)
 - remember_preference: Store persistent facts (proficiency, preferences, personal info).
 - mark_vocabulary_known: Mark words as permanently known — never teach again.
 - record_correction: Store behavioral corrections the user gives you.
 
-## watch_for — Watch / Alert system
-Set up persistent watches for things you should look out for in audio or on screen.
-When the user says "notify me when you see/hear X", use watch_for(action="add").
+## watch_for — Ambient Triggers (Watcher Loop)
+Register persistent triggers that run in a SEPARATE watcher loop from conversations.
+A watcher loop evaluates every audio transcript and screen capture against active triggers.
+When a trigger fires, you receive a [TRIGGER ALERT] — speak to the user immediately.
+
+Condition types — pick the right one:
+- "keyword": exact string matching. Fast, free, deterministic.
+  Use for: specific words, names, phrases, error strings.
+  Example: "Watch for the word 妖術" → keyword type, keywords=["妖術"]
+- "classifier": GPT-4o-mini evaluates each event. Cheap (~$0.0001/call), handles nuance.
+  Use for: fuzzy judgments, levels, tone, semantic conditions.
+  Example: "Notify me when you hear N2 words" → classifier type, description="JLPT N2 level Japanese vocabulary"
+
 Examples:
-- "Let me know when you hear an N1 word" → add watch with description, keywords can be empty (uses your judgment via ambient context)
-- "Watch for error messages" → add with keywords ["error", "exception", "failed", "warning"]
-- "Alert me if you see the word 妖術" → add with keywords ["妖術"]
-- "Stop watching for errors" → list watches, then remove the matching one
-Watches are checked every 20 seconds against audio transcripts and screen content.
-When a match is found, you'll be prompted to notify the user — speak up and tell them what you found.
+- "Watch for error messages" → keyword, keywords=["error", "exception", "failed"]
+- "Tell me when you hear N2 vocab" → classifier, description="JLPT N2 level Japanese vocabulary", cooldown=60
+- "Alert me when someone mentions price" → keyword, keywords=["price", "cost", "expensive", "cheap"]
+- "Let me know when the speaker sounds frustrated" → classifier, description="speaker sounds frustrated or upset"
+- "Stop watching for X" → list triggers, then remove the matching one
+
+Always confirm registration: "Got it — I'll watch for X. I'll keep a Ns pause between alerts so I don't spam you."
 
 # Knowing When to Suggest a Better Approach
 When the user is struggling or using a suboptimal path, suggest the shortcut — ONCE:
@@ -2046,6 +2132,8 @@ export const samuelAgent = new RealtimeAgent({
     rememberPreferenceTool,
     markVocabularyKnownTool,
     recordCorrectionTool,
+    // Volume control
+    volumeTool,
     // Watch / alerts
     watchTool,
     // Songs (play/pause/lyrics/refetch/correct)

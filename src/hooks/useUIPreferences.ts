@@ -164,6 +164,12 @@ const SCHEMA: Record<string, PropSchema> = {
     aliases: ["app.height"],
   },
 
+  // ── Volume ──
+  "volume.samuel": {
+    type: "number", default: 80, min: 0, max: 100, step: 10, unit: "%",
+    aliases: ["volume.voice", "volume.output", "samuel.volume", "voice.volume"],
+  },
+
   // ── Privacy (non-visual but voice-toggleable) ──
   "privacy.screen_watch": {
     type: "boolean", default: false,
