@@ -2,7 +2,7 @@
 
 An always-on voice AI desktop assistant for macOS that watches your screen, listens to audio, browses the web like a human, generates its own plugins with GPT-5.5 reasoning, and auto-repairs them when they fail. Built with Tauri v2, React, TypeScript, and Playwright. MIT licensed.
 
-**Use cases:** ambient language learning, voice-controlled web browsing, self-building AI tools, hands-free desktop automation, live meeting interpretation, real-time video translation, AI tutoring, email/calendar access via browser automation.
+**Use cases:** ambient language learning, voice-controlled web browsing, self-building AI tools, hands-free desktop automation, live meeting interpretation, real-time video translation, AI tutoring, email/calendar access via browser automation, ambient monitoring ("tell me when you see/hear X").
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![macOS](https://img.shields.io/badge/platform-macOS-black.svg)
@@ -99,13 +99,33 @@ You:     "The lyrics are wrong again"
 Samuel:  *loads saved skill → executes in seconds*
 ```
 
+### Ambient Triggers — "Tell Me When You See/Hear X"
+
+Samuel runs a **watcher loop** separate from the conversation loop — the ambient agent architecture. Register triggers by voice and Samuel evaluates every audio transcript and screen capture against them:
+
+```
+You:     "Let me know when you hear N2 level Japanese words"
+Samuel:  "Got it — I'll watch for N2 vocab. 60-second cooldown between alerts."
+
+         ...anime is playing...
+
+Samuel:  "I just heard 妖術 (yōjutsu) — that's N2 level. It means sorcery."
+```
+
+Two evaluation tiers:
+- **Keyword triggers** — exact string matching, deterministic, zero cost. "Watch for the word 'error'"
+- **Classifier triggers** — GPT-4o-mini evaluates each event (~$0.0001/call). "Alert me when the speaker sounds frustrated"
+
+Triggers are first-class objects with cooldowns, enable/disable, fire counts, and source filtering (audio, screen, or both). Works independently of learning mode — say "tell me when you see a loading spinner" while doing anything.
+
 ### Always Watching, Always Listening
 
 Samuel runs a continuous perception loop:
 
-- **Screen** — captures via GPT-4o Vision every 20s with smart change detection
+- **Screen** — captures via GPT-4o Vision every 20s with smart change detection; fresh screenshot auto-injected when you speak
 - **Audio** — transcribes system audio via ScreenCaptureKit with PID-level filtering (excludes his own voice)
 - **Context injection** — feeds observations silently so he always knows what's happening
+- **Watcher loop** — evaluates active triggers against every audio/screen event, fires synthetic turns to speak proactively
 
 ### Capability Boundaries — Honest About What He Can and Cannot Do
 
@@ -147,6 +167,8 @@ Samuel is his own settings panel. No menus, no preferences screen:
 | "Make the window wider" | App window resizes |
 | "Show me word cards while I watch" | Switches to auto vocab card mode |
 | "Move the lyrics to the left" | Lyrics panel repositions + window auto-adjusts |
+| "Speak quieter" / "You're too loud" | Samuel's voice volume adjusts independently |
+| "Turn down the video" | macOS system volume adjusts |
 | "Reset the UI" | All visual settings restored |
 
 ---
@@ -202,18 +224,26 @@ Toggle screen watching and audio listening directly from the settings button. Al
 ```
 "Hey Samuel" → Wake word → OpenAI Realtime API → 20+ tools → Voice response
                                     ↕
-         Screen capture (GPT-4o Vision, change detection, every 20s)
-         System audio (ScreenCaptureKit, PID-level filtering)
-         Browser automation (Playwright, headed Chromium, visible to user)
-         Plugin system: propose → GPT-5.5 generate → review → validate → install
-         Auto-repair: detect failure → GPT-5.5 diagnose → route repair → verify
-         Wraps/middleware: plugins extend existing tools without replacing them
-         Skill system: execute workflow → save as skill → replay next time
-         OAuth: PKCE + built-in client IDs → zero-config for known providers
-         Song playback: yt-dlp → local audio → HTML5 <audio> with seek
-         Recording: Whisper transcribe → user-directed analysis
-         Secrets store: ~/.samuel/secrets.json (local)
-         Personality memory: preferences + corrections + facts + skills
+         ┌─ Loop 1: Conversation loop (user-driven, reactive)
+         │   Screen capture (GPT-4o Vision, change detection, auto-inject on speech)
+         │   System audio (ScreenCaptureKit, PID-level filtering)
+         │   Browser automation (Playwright, headed Chromium, visible to user)
+         │
+         ├─ Loop 2: Watcher loop (event-driven, proactive)
+         │   Trigger evaluation: keyword match + GPT-4o-mini classifier
+         │   Synthetic turn injection → Samuel speaks unprompted
+         │   Cooldowns + agent-state-aware (no interrupts mid-speech)
+         │
+         ├─ Plugin system: propose → GPT-5.5 generate → review → validate → install
+         ├─ Auto-repair: detect failure → GPT-5.5 diagnose → route repair → verify
+         ├─ Wraps/middleware: plugins extend existing tools without replacing them
+         ├─ Skill system: execute workflow → save as skill → replay next time
+         ├─ OAuth: PKCE + built-in client IDs → zero-config for known providers
+         ├─ Song playback: yt-dlp → local audio → HTML5 <audio> with seek
+         ├─ Recording: Whisper transcribe → user-directed analysis
+         ├─ Volume control: independent Samuel voice + macOS system volume
+         ├─ Secrets store: ~/.samuel/secrets.json (local)
+         └─ Personality memory: preferences + corrections + facts + skills
 ```
 
 ### Models
@@ -223,7 +253,7 @@ Toggle screen watching and audio listening directly from the settings button. Al
 | OpenAI Realtime API | Voice conversation, all interactive features | ~500ms |
 | GPT-5.5 (reasoning) | Plugin code generation, failure diagnosis | ~3-8s |
 | GPT-4o Vision | Screen scanning, ambient observation | ~3-5s |
-| GPT-4o-mini | Plugin code review, annotations | ~1s |
+| GPT-4o-mini | Plugin code review, trigger classification, screen text extraction | ~1s |
 | gpt-4o-transcribe | Recording transcription (high-fidelity) | ~3-10s |
 | whisper-1 | Song segmentation with timestamps | ~3-5s |
 
@@ -238,7 +268,8 @@ Toggle screen watching and audio listening directly from the settings button. Al
 | `skill_manage` | Save, search, and replay multi-step workflows |
 | `song_control` | Play, pause, lyrics, refetch, correct |
 | `recording` | Start/stop system audio capture |
-| `teach_from_content` | Analyze YouTube, URLs, text, images for learning |
+| `watch_for` | Register ambient triggers — keyword or classifier-based |
+| `set_volume` | Adjust Samuel's voice or macOS system volume |
 | `update_ui` | Voice-controlled UI changes |
 | `vocab_card` | Vocabulary cards (manual/auto mode) |
 | `oauth_connect` | Zero-config OAuth for Google/GitHub/Spotify |
@@ -318,6 +349,7 @@ Say **"Hey Samuel"** and start talking.
 | Plugin generation (GPT-5.5) | ~$0.005/plugin |
 | Plugin diagnosis (GPT-5.5) | ~$0.003/diagnosis |
 | Plugin review (GPT-4o-mini) | ~$0.001/review |
+| Trigger evaluation (GPT-4o-mini) | ~$0.0001/event |
 | Voice conversation | Standard Realtime API pricing |
 | Browser automation | Free (runs locally) |
 
@@ -345,7 +377,7 @@ The vision: an AI that lives where you work, sees what you see, hears what you h
 - **Plugin marketplace** — share and install community-built tools and workflows.
 - **Demonstration learning** — "watch me do this once" → Samuel learns the workflow from screen recordings.
 - **MCP support** — connect to Notion, Gmail, Slack, GitHub, and any MCP server.
-- **General monitoring mode** — "watch this meeting and flag anything important."
+- **General monitoring mode** — "watch this meeting and flag anything important." *(shipped — ambient triggers with keyword + classifier evaluation)*
 - **Local-first mode** — local Whisper + Ollama, no API key required.
 - **Cross-platform** — Windows and Linux ports.
 - **iOS / Android companion** — pick up where you left off.
@@ -362,6 +394,7 @@ The vision: an AI that lives where you work, sees what you see, hears what you h
 | Voice conversation | Yes | Yes | No | No | No |
 | Screen vision | Yes | Partial | No | Yes | No |
 | Audio listening | Yes | No | Yes | Yes | Yes |
+| Proactive alerts ("tell me when X") | Yes | No | No | No | No |
 | Web browsing (real browser) | Yes | No | No | No | No |
 | Self-modifying (writes tools) | Yes | No | No | No | No |
 | Auto-repairs its own tools | Yes | No | No | No | No |
@@ -376,7 +409,7 @@ The vision: an AI that lives where you work, sees what you see, hears what you h
 An open-source voice AI desktop agent that continuously sees your screen and hears your audio, lets you control it by voice, browses the web like a human, and writes and repairs its own tools at runtime using GPT-5.5 with reasoning.
 
 **What can I use it for?**
-Language learning while watching content, hands-free web browsing ("show me my emails"), building custom AI tools by voice, live meeting interpretation, searching and summarizing anything on the web, and general desktop automation.
+Language learning while watching content, hands-free web browsing ("show me my emails"), building custom AI tools by voice, live meeting interpretation, searching and summarizing anything on the web, ambient monitoring ("tell me when you hear X"), and general desktop automation.
 
 **How is this different from ChatGPT Voice?**
 ChatGPT can't see your screen continuously, can't browse the web as a real browser, can't write persistent tools, and can't auto-repair when things break. Samuel does all of these, and runs locally on your Mac.
