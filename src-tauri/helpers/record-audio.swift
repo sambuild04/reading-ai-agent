@@ -5,19 +5,23 @@ import ScreenCaptureKit
 
 // ScreenCaptureKit system audio recorder.
 // Captures system audio to an M4A file, optionally excluding specific processes.
-// Usage: record-audio [output-path] [--exclude-pid PID ...]
+// Usage: record-audio [output-path] [--exclude-pid PID ...] [--exclude-bundle BUNDLE_ID ...]
 // Runs until SIGTERM/SIGINT is received, then finalizes and exits.
 
 var outputPath = "/tmp/samuel-recording.m4a"
 var excludePIDs: [Int32] = []
+var excludeBundles: [String] = []
 
-// Parse arguments: first positional arg is output path, --exclude-pid <PID> pairs follow
+// Parse arguments
 var i = 1
 while i < CommandLine.arguments.count {
     let arg = CommandLine.arguments[i]
     if arg == "--exclude-pid", i + 1 < CommandLine.arguments.count,
        let pid = Int32(CommandLine.arguments[i + 1]) {
         excludePIDs.append(pid)
+        i += 2
+    } else if arg == "--exclude-bundle", i + 1 < CommandLine.arguments.count {
+        excludeBundles.append(CommandLine.arguments[i + 1])
         i += 2
     } else if !arg.hasPrefix("--") {
         outputPath = arg
@@ -58,9 +62,10 @@ class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
         config.height = 2
         config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
 
-        // Filter out excluded processes (e.g. Samuel's TTS) so we only capture external audio
+        // Filter out excluded processes/bundles (e.g. Samuel's own audio output)
         let excludedApps = content.applications.filter { app in
-            excludePIDs.contains(app.processID)
+            excludePIDs.contains(app.processID) ||
+            excludeBundles.contains(app.bundleIdentifier)
         }
         let filter: SCContentFilter
         if excludedApps.isEmpty {

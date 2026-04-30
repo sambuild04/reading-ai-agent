@@ -1852,6 +1852,47 @@ CRITICAL RULES:
 // Persistent audio monitor for learning mode
 // ---------------------------------------------------------------------------
 
+/// Ring buffer of Samuel's recent spoken text — used to filter self-voice from
+/// audio transcripts when the bundle exclusion fails or is incomplete.
+static SAMUEL_RECENT_SPEECH: Mutex<Vec<String>> = Mutex::new(Vec::new());
+const MAX_SPEECH_BUFFER: usize = 10;
+
+/// Called by the frontend whenever Samuel finishes speaking.
+#[tauri::command]
+pub async fn record_samuel_speech(text: String) -> Result<(), String> {
+    if text.trim().is_empty() { return Ok(()); }
+    let mut buf = SAMUEL_RECENT_SPEECH.lock().map_err(|e| format!("lock: {e}"))?;
+    buf.push(text.to_lowercase());
+    if buf.len() > MAX_SPEECH_BUFFER {
+        buf.remove(0);
+    }
+    Ok(())
+}
+
+/// Check if transcript substantially overlaps with Samuel's recent speech.
+fn is_self_voice(transcript: &str) -> bool {
+    let lower = transcript.to_lowercase();
+    let buf = match SAMUEL_RECENT_SPEECH.lock() {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    for speech in buf.iter() {
+        // If the transcript is a substring of Samuel's speech or vice versa
+        if speech.contains(&lower) || lower.contains(speech.as_str()) {
+            return true;
+        }
+        // Fuzzy: if >60% of transcript chars appear in a recent speech segment
+        if lower.len() > 5 && speech.len() > 5 {
+            let overlap = lower.chars().filter(|c| speech.contains(*c)).count();
+            let ratio = overlap as f64 / lower.chars().count().max(1) as f64;
+            if ratio > 0.8 && lower.len() > 10 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn start_learning_audio_internal() -> Result<(), String> {
     let helper = find_record_helper()?;
     let mut guard = LEARNING_AUDIO_CHILD.lock().map_err(|e| format!("lock: {e}"))?;
@@ -1864,14 +1905,20 @@ fn start_learning_audio_internal() -> Result<(), String> {
         return Ok(());
     }
     let _ = fs::remove_file(LEARNING_AUDIO_PATH);
-    // Exclude our own process so Samuel's TTS doesn't get captured
+    // Exclude our own app by bundle ID — this covers the main process AND the
+    // WebView subprocess that plays WebRTC audio (Samuel's voice output).
+    // PID-only exclusion misses the WebView child process.
     let my_pid = std::process::id().to_string();
     let child = Command::new(&helper)
-        .args([LEARNING_AUDIO_PATH, "--exclude-pid", &my_pid])
+        .args([
+            LEARNING_AUDIO_PATH,
+            "--exclude-pid", &my_pid,
+            "--exclude-bundle", "com.samuel.bookreader",
+        ])
         .stderr(std::process::Stdio::inherit())
         .spawn()
         .map_err(|e| format!("start learning audio: {e}"))?;
-    eprintln!("[learning-audio] started pid={} (excluding own pid={})", child.id(), my_pid);
+    eprintln!("[learning-audio] started pid={} (excluding own pid={} + bundle)", child.id(), my_pid);
     *guard = Some(child);
     Ok(())
 }
@@ -1939,6 +1986,64 @@ fn convert_to_pcm_base64(m4a_path: &str) -> Option<String> {
         return None;
     }
     Some(base64::engine::general_purpose::STANDARD.encode(&pcm_data))
+}
+
+/// Detect Whisper hallucinations that occur on silence, music, or noise.
+/// Whisper commonly generates: repetitive phrases, religious/philosophical text,
+/// single loanwords, or "thank you for watching" patterns.
+fn is_whisper_hallucination(text: &str) -> bool {
+    let trimmed = text.trim();
+
+    // Single word or very short non-conversational fragments
+    let char_count = trimmed.chars().count();
+    if char_count <= 4 {
+        return true;
+    }
+
+    // Known Whisper hallucination patterns (appear on silence/music)
+    let hallucination_markers = [
+        "ご視聴ありがとうございました",   // "thank you for watching"
+        "チャンネル登録",                // "subscribe to channel"
+        "お疲れ様でした",                // "good work" (end-of-video filler)
+        "ありがとうございました",         // "thank you" standalone
+        "よろしくお願いします",           // "please take care of me" standalone
+        "字幕は",                       // subtitle attribution
+        "字幕作成",                     // subtitle creation
+        "Amara.org",
+        "神の力",                       // "power of God" — religious hallucination
+        "主イエス",                     // "Lord Jesus"
+        "聖霊",                        // "Holy Spirit"
+        "魂に注入",                     // "infused into souls"
+        "amen",
+    ];
+    let lower = trimmed.to_lowercase();
+    if hallucination_markers.iter().any(|m| lower.contains(&m.to_lowercase())) {
+        return true;
+    }
+
+    // Repetition detection: if the same short phrase repeats 3+ times
+    if char_count > 10 {
+        let half = &trimmed[..trimmed.len() / 2];
+        let quarter_len = trimmed.len() / 4;
+        if quarter_len > 2 {
+            let chunk = &trimmed[..quarter_len];
+            let count = trimmed.matches(chunk).count();
+            if count >= 3 {
+                return true;
+            }
+        }
+        // Same first and second half (doubled text)
+        if trimmed.len() > 10 {
+            let mid = trimmed.len() / 2;
+            let first = &trimmed[..mid];
+            let second = &trimmed[mid..];
+            if first == second {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Stop recorder, transcribe accumulated audio, restart recorder, return hints.
@@ -2029,6 +2134,20 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
 
     if transcript.is_empty() || transcript.len() < 5 {
         eprintln!("[learning-audio] no speech detected");
+        return Ok(empty);
+    }
+
+    // Filter Whisper hallucinations — common on silence, music, or white noise.
+    // Whisper produces fake "transcripts" that are repetitive or overly literary.
+    if is_whisper_hallucination(&transcript) {
+        eprintln!("[learning-audio] filtered hallucination: {}", truncate_str(&transcript, 80));
+        return Ok(empty);
+    }
+
+    // Filter Samuel's own voice — compare against his recent spoken text.
+    // This catches cases where the bundle exclusion doesn't fully work.
+    if is_self_voice(&transcript) {
+        eprintln!("[learning-audio] filtered self-voice: {}", truncate_str(&transcript, 80));
         return Ok(empty);
     }
 

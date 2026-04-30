@@ -72,6 +72,7 @@ pub fn run() {
             start_learning_audio,
             stop_learning_audio,
             check_learning_audio,
+            record_samuel_speech,
             get_selected_text,
             memory_clear,
             memory_get_context,

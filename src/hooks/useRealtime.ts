@@ -402,6 +402,9 @@ export function useRealtime(): UseRealtimeReturn {
           if (finalText) {
             lastAgentTextRef.current = finalText;
             recordTurn("assistant", finalText);
+            // Feed Samuel's spoken text to the self-voice filter so the
+            // learning audio doesn't capture and re-process his own speech.
+            invoke("record_samuel_speech", { text: finalText }).catch(() => {});
             if (assistantEntryIdRef.current) {
               const id = assistantEntryIdRef.current;
               setTranscript((prev) =>
