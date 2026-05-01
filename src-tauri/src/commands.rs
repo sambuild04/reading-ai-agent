@@ -276,11 +276,13 @@ fn capture_full_display() -> Result<CaptureResult, String> {
         return Err("Captured image too small".to_string());
     }
 
+    // 1280px wide at quality 45 keeps the JPEG under ~150KB (base64 ~200KB)
+    // which the Realtime API can process without stalling
     let sips_result = Command::new("/usr/bin/sips")
         .args([
-            "--resampleWidth", "1920",
+            "--resampleWidth", "1280",
             "--setProperty", "format", "jpeg",
-            "--setProperty", "formatOptions", "55",
+            "--setProperty", "formatOptions", "45",
             tmp_png,
             "--out", tmp_jpg,
         ])
@@ -294,6 +296,7 @@ fn capture_full_display() -> Result<CaptureResult, String> {
     };
 
     let jpg_data = fs::read(final_path).map_err(|e| format!("Read JPEG: {e}"))?;
+    eprintln!("[capture] full-display JPEG: {} bytes", jpg_data.len());
     let _ = fs::remove_file(final_path);
 
     let b64 = base64::engine::general_purpose::STANDARD.encode(&jpg_data);
