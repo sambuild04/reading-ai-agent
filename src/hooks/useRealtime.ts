@@ -26,6 +26,7 @@ export interface TranscriptEntry {
 const HEARTBEAT_INTERVAL_MS = 30_000; // ping every 30s to prevent server-side idle timeout
 const SESSION_ROTATION_MS = 25 * 60 * 1000; // reconnect every 25 min (before 60-min hard cap)
 const CONTEXT_WINDOW_TURNS = 6; // carry this many turns across reconnections
+const AUTO_SCREEN_COOLDOWN_MS = 5_000; // min 5s between auto-screen injections to prevent token flood
 
 interface ConversationTurn {
   role: "user" | "assistant";
@@ -139,6 +140,9 @@ export function useRealtime(): UseRealtimeReturn {
   // Count completed agent responses. The first response is always the greeting —
   // any VAD trigger immediately after it is guaranteed to be echo, not user speech.
   const agentResponseCountRef = useRef(0);
+
+  // Rate-limit auto-screen injections to prevent flooding the session with images.
+  const lastAutoScreenRef = useRef(0);
 
   // True while a response is being generated (audio may still be playing).
   // Mic stays muted until this goes false + delay, preventing mid-sentence cutoff.
@@ -296,28 +300,33 @@ export function useRealtime(): UseRealtimeReturn {
 
         case "input_audio_buffer.speech_stopped":
           setAgentState("thinking");
-          // Auto-inject a fresh screenshot so Samuel always sees the current
-          // screen when responding. This makes "what is this?" and "what about
-          // this?" work without Samuel needing to call observe_screen first.
-          // Uses a lightweight capture — only injects if screen has changed.
-          invoke<{ base64: string; app_name: string } | null>("capture_if_changed")
-            .then((result) => {
-              if (result && sessionRef.current) {
-                sessionRef.current.transport.sendEvent({
-                  type: "conversation.item.create",
-                  item: {
-                    type: "message",
-                    role: "user",
-                    content: [{
-                      type: "input_image",
-                      image_url: `data:image/jpeg;base64,${result.base64}`,
-                    }],
-                  },
-                });
-                console.log(`[auto-screen] injected fresh screenshot (${result.app_name})`);
-              }
-            })
-            .catch(() => {}); // non-critical, don't block response
+          // Auto-inject a fresh screenshot — rate-limited to prevent flooding
+          // the session with images (which can exceed token limits and disconnect).
+          {
+            const now = Date.now();
+            const elapsed = now - lastAutoScreenRef.current;
+            if (elapsed >= AUTO_SCREEN_COOLDOWN_MS) {
+              lastAutoScreenRef.current = now;
+              invoke<{ base64: string; app_name: string } | null>("capture_if_changed")
+                .then((result) => {
+                  if (result && sessionRef.current) {
+                    sessionRef.current.transport.sendEvent({
+                      type: "conversation.item.create",
+                      item: {
+                        type: "message",
+                        role: "user",
+                        content: [{
+                          type: "input_image",
+                          image_url: `data:image/jpeg;base64,${result.base64}`,
+                        }],
+                      },
+                    });
+                    console.log(`[auto-screen] screen changed (app=${result.app_name}), injecting`);
+                  }
+                })
+                .catch(() => {});
+            }
+          }
           break;
 
         case "conversation.item.input_audio_transcription.completed": {
