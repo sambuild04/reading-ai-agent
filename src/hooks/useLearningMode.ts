@@ -99,23 +99,37 @@ export function useLearningMode(
     };
   }, [language, audioListenEnabled]);
 
-  // Flush audio buffer when Samuel starts speaking — discard anything captured
-  // during his speech so his own voice isn't re-transcribed as learning content.
+  // STOP the audio recorder while Samuel is speaking or thinking — his own
+  // voice leaks into system audio capture despite PID/bundle exclusion.
+  // Only restart 1.5s after he finishes to let the audio pipeline clear.
   const wasSpeakingRef = useRef(false);
+  const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    if (agentState === "speaking" && !wasSpeakingRef.current) {
-      // Samuel just started speaking — flush and restart the recorder
+    const isBusy = agentState === "speaking" || agentState === "thinking";
+    if (isBusy && !wasSpeakingRef.current) {
       wasSpeakingRef.current = true;
-      if (language && audioListenEnabled) {
-        invoke("flush_learning_audio").catch(() => {});
+      if (restartTimerRef.current) {
+        clearTimeout(restartTimerRef.current);
+        restartTimerRef.current = null;
       }
-    } else if (agentState !== "speaking" && wasSpeakingRef.current) {
-      // Samuel stopped speaking — restart recorder fresh
-      wasSpeakingRef.current = false;
       if (language && audioListenEnabled) {
-        invoke("flush_learning_audio").catch(() => {});
+        invoke("stop_learning_audio").catch(() => {});
+      }
+    } else if (!isBusy && wasSpeakingRef.current) {
+      wasSpeakingRef.current = false;
+      // Delay restart so Samuel's audio fully clears from the system buffer
+      if (language && audioListenEnabled) {
+        restartTimerRef.current = setTimeout(() => {
+          invoke("start_learning_audio").catch(() => {});
+          restartTimerRef.current = null;
+        }, 1500);
       }
     }
+    return () => {
+      if (restartTimerRef.current) {
+        clearTimeout(restartTimerRef.current);
+      }
+    };
   }, [agentState, language, audioListenEnabled]);
 
   // Tracks when the session started (for warmup gating)

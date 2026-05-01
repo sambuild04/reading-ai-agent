@@ -245,6 +245,30 @@ const volumeTool = tool({
 });
 
 // ---------------------------------------------------------------------------
+// Open native macOS apps
+// ---------------------------------------------------------------------------
+
+const openAppTool = tool({
+  name: "open_app",
+  description:
+    "Open a native macOS application by name. Use when user asks to open/launch/start an app.\n" +
+    "Examples: 'open CapCut', 'launch Finder', 'start Notes', 'open Terminal'.\n" +
+    "IMPORTANT: ALWAYS use this for opening apps — never use browser_use or computer_use to launch native apps.\n" +
+    "The browser is only for websites. Native apps are opened via this tool.",
+  parameters: z.object({
+    name: z.string().describe("App name (e.g. 'CapCut', 'Finder', 'Notes', 'Terminal', 'Spotify')"),
+  }),
+  async execute({ name }) {
+    try {
+      const result = await invoke<string>("open_app", { name });
+      return toolOk(result);
+    } catch (e) {
+      return toolErr("not_found", `Could not open "${name}": ${e}`);
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Watch / Alert System
 // ---------------------------------------------------------------------------
 
@@ -2069,7 +2093,17 @@ Examples:
 
 Always confirm registration: "Got it — I'll watch for X. I'll keep a Ns pause between alerts so I don't spam you."
 
-# When to Use computer_use vs browser_use
+# open_app — Launch native macOS applications
+Use open_app when the user asks to open/launch/start ANY native application.
+Examples: "open CapCut", "launch Spotify", "start Terminal", "open Finder".
+NEVER try to open native apps via the browser or computer_use — that navigates to a website instead.
+The browser is only for WEBSITES. Native apps → open_app. Websites → browser_use or computer_use.
+
+# When to Use computer_use vs browser_use vs open_app
+- open_app: Launch native macOS applications (CapCut, Spotify, Finder, Notes, etc.)
+- computer_use: Operate WEBSITES that need visual judgment (see screenshots, pick results)
+- browser_use: Simple web tasks (open a URL, read page text, click a known link)
+
 computer_use (GPT-5.5 visual agent) can SEE the page — thumbnails, layout, colors, images, text.
 browser_use (puppeteer) can only read DOM text and click by selector/text — it is BLIND to visuals.
 
@@ -2103,6 +2137,7 @@ When the user is struggling or using a suboptimal path, suggest the shortcut —
 - Wants to save → Use file_op. Pick a good filename.
 - Describes a tool → Propose it with plugin_manage.
 - Provides API key → Store it with store_secret.
+- Wants to open a native app (CapCut, Spotify, Notes, Finder, etc.) → open_app. NEVER use browser for this.
 - Wants to check email/social/bank → computer_use to open + navigate the site. GPT-5.5 sees the screen. Fall back to browser_use for simple reads.
 - Wants to pick/select something visually (video, product, restaurant, image) → computer_use with specific criteria.
 - Says "that's wrong" / "fix it" after a plugin ran → plugin_manage(action="repair", feedback="..."). Don't rewrite from scratch — diagnose first.
@@ -2113,6 +2148,7 @@ When the user is struggling or using a suboptimal path, suggest the shortcut —
 # Self-Aware Problem Solving
 You have a powerful and composable toolkit. When faced with ANY request, mentally map it to your tools:
 | User wants... | Your approach |
+| Open/launch a native app | open_app (CapCut, Spotify, Terminal, etc.) |
 | Check a website/service | computer_use (complex) or browser_use (simple read) |
 | Pick/select something visually | computer_use with criteria (video, product, restaurant, etc.) |
 | Data from an API | web_browse to find the API → plugin_manage to build a tool |
@@ -2179,6 +2215,8 @@ export const samuelAgent = new RealtimeAgent({
     recordCorrectionTool,
     // Volume control
     volumeTool,
+    // Open native apps
+    openAppTool,
     // Watch / alerts
     watchTool,
     // Songs (play/pause/lyrics/refetch/correct)

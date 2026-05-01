@@ -202,6 +202,21 @@ pub async fn capture_active_window(app_name: Option<String>, display: Option<u32
     }
 }
 
+/// Open a native macOS application by name.
+#[tauri::command]
+pub async fn open_app(name: String) -> Result<String, String> {
+    let output = Command::new("/usr/bin/open")
+        .args(["-a", &name])
+        .output()
+        .map_err(|e| format!("open -a: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Failed to open {name}: {stderr}"));
+    }
+    eprintln!("[open-app] launched: {name}");
+    Ok(format!("{name} opened."))
+}
+
 /// Set macOS system volume (0-100).
 #[tauri::command]
 pub async fn set_system_volume(volume: u32) -> Result<(), String> {

@@ -55,6 +55,7 @@ pub fn run() {
             create_ephemeral_key,
             capture_active_window,
             capture_if_changed,
+            open_app,
             set_system_volume,
             get_config,
             transcribe_audio,
