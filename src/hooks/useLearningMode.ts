@@ -99,6 +99,25 @@ export function useLearningMode(
     };
   }, [language, audioListenEnabled]);
 
+  // Flush audio buffer when Samuel starts speaking — discard anything captured
+  // during his speech so his own voice isn't re-transcribed as learning content.
+  const wasSpeakingRef = useRef(false);
+  useEffect(() => {
+    if (agentState === "speaking" && !wasSpeakingRef.current) {
+      // Samuel just started speaking — flush and restart the recorder
+      wasSpeakingRef.current = true;
+      if (language && audioListenEnabled) {
+        invoke("flush_learning_audio").catch(() => {});
+      }
+    } else if (agentState !== "speaking" && wasSpeakingRef.current) {
+      // Samuel stopped speaking — restart recorder fresh
+      wasSpeakingRef.current = false;
+      if (language && audioListenEnabled) {
+        invoke("flush_learning_audio").catch(() => {});
+      }
+    }
+  }, [agentState, language, audioListenEnabled]);
+
   // Tracks when the session started (for warmup gating)
   const sessionStartRef = useRef(0);
 

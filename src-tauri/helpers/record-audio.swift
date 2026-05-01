@@ -62,10 +62,18 @@ class AudioRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
         config.height = 2
         config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
 
-        // Filter out excluded processes/bundles (e.g. Samuel's own audio output)
+        // Filter out excluded processes/bundles (e.g. Samuel's own audio output).
+        // Also exclude WebKit helper processes — WKWebView routes WebRTC audio
+        // through com.apple.WebKit.GPU / com.apple.WebKit.WebContent.
+        let webkitBundles = [
+            "com.apple.WebKit.GPU",
+            "com.apple.WebKit.WebContent",
+            "com.apple.WebKit.Networking",
+        ]
         let excludedApps = content.applications.filter { app in
             excludePIDs.contains(app.processID) ||
-            excludeBundles.contains(app.bundleIdentifier)
+            excludeBundles.contains(app.bundleIdentifier) ||
+            (!excludeBundles.isEmpty && webkitBundles.contains(app.bundleIdentifier))
         }
         let filter: SCContentFilter
         if excludedApps.isEmpty {

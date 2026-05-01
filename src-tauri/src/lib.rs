@@ -71,6 +71,7 @@ pub fn run() {
             triage_observation,
             start_learning_audio,
             stop_learning_audio,
+            flush_learning_audio,
             check_learning_audio,
             record_samuel_speech,
             get_selected_text,

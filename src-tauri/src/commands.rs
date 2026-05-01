@@ -1962,6 +1962,15 @@ pub async fn stop_learning_audio() -> Result<(), String> {
     Ok(())
 }
 
+/// Flush and restart the audio recorder — discards the current recording.
+/// Called when Samuel starts/stops speaking to prevent self-voice capture.
+#[tauri::command]
+pub async fn flush_learning_audio() -> Result<(), String> {
+    stop_learning_audio_internal()?;
+    let _ = fs::remove_file(LEARNING_AUDIO_PATH);
+    start_learning_audio_internal()
+}
+
 /// Convert an m4a file to PCM16 24kHz mono base64 for Realtime API injection.
 fn convert_to_pcm_base64(m4a_path: &str) -> Option<String> {
     let pcm_path = format!("{m4a_path}.pcm");
