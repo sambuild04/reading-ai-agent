@@ -186,19 +186,21 @@ pub async fn create_ephemeral_key() -> Result<String, String> {
 
 
 /// Capture a window or display. If `app_name` is provided, target that app;
-/// otherwise use the default display chosen via the UI picker.
+/// otherwise capture the full display so the model sees everything.
 /// If `display` index is provided, capture that specific display directly.
 #[tauri::command]
 pub async fn capture_active_window(app_name: Option<String>, display: Option<u32>) -> Result<CaptureResult, String> {
     if let Some(idx) = display {
-        // Temporarily override the default display for this capture
         let prev = DEFAULT_DISPLAY.load(Ordering::Relaxed);
         DEFAULT_DISPLAY.store(idx, Ordering::Relaxed);
-        let result = capture_focused_window(None);
+        let result = capture_full_display();
         DEFAULT_DISPLAY.store(prev, Ordering::Relaxed);
         result
-    } else {
+    } else if app_name.is_some() {
         capture_focused_window(app_name)
+    } else {
+        // No app specified — capture entire screen so model sees all apps
+        capture_full_display()
     }
 }
 
@@ -234,12 +236,12 @@ pub async fn set_system_volume(volume: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// Capture a screenshot only if the screen has changed since the last capture.
-/// Used for auto-injecting fresh screenshots when the user speaks, so the model
-/// always sees the current screen without wasting tokens on identical images.
+/// Capture a full-display screenshot only if the screen has changed since the last capture.
+/// Always captures the entire display (all visible apps) rather than a single app window,
+/// so the model sees exactly what the user sees.
 #[tauri::command]
 pub async fn capture_if_changed() -> Result<Option<CaptureResult>, String> {
-    let capture = capture_focused_window(None)?;
+    let capture = capture_full_display()?;
     let current_hash = hash_bytes(capture.base64.as_bytes());
 
     let mut prev_hash = AUTO_SCREEN_HASH.lock().map_err(|e| format!("lock: {e}"))?;
@@ -247,8 +249,55 @@ pub async fn capture_if_changed() -> Result<Option<CaptureResult>, String> {
         return Ok(None);
     }
     *prev_hash = current_hash;
-    eprintln!("[auto-screen] screen changed (app={}), injecting", capture.app_name);
+    eprintln!("[auto-screen] screen changed, injecting (display {})", capture.app_name);
     Ok(Some(capture))
+}
+
+/// Captures the entire default display (full screen, all apps visible).
+fn capture_full_display() -> Result<CaptureResult, String> {
+    let tmp_png = "/tmp/samuel-autoscreen.png";
+    let tmp_jpg = "/tmp/samuel-autoscreen.jpg";
+
+    let _ = fs::remove_file(tmp_png);
+
+    let display_idx = DEFAULT_DISPLAY.load(Ordering::Relaxed);
+    let d_flag = format!("-D{display_idx}");
+    let sc = Command::new("/usr/sbin/screencapture")
+        .args(["-x", &d_flag, tmp_png])
+        .output()
+        .map_err(|e| format!("screencapture failed: {e}"))?;
+    if !sc.status.success() {
+        return Err("screencapture failed".to_string());
+    }
+
+    let data = fs::read(tmp_png).map_err(|e| format!("Read capture: {e}"))?;
+    if data.len() < 1000 {
+        let _ = fs::remove_file(tmp_png);
+        return Err("Captured image too small".to_string());
+    }
+
+    let sips_result = Command::new("/usr/bin/sips")
+        .args([
+            "--resampleWidth", "1920",
+            "--setProperty", "format", "jpeg",
+            "--setProperty", "formatOptions", "55",
+            tmp_png,
+            "--out", tmp_jpg,
+        ])
+        .output();
+
+    let _ = fs::remove_file(tmp_png);
+
+    let final_path = match sips_result {
+        Ok(output) if output.status.success() => tmp_jpg,
+        _ => return Err("Failed to resize screenshot".to_string()),
+    };
+
+    let jpg_data = fs::read(final_path).map_err(|e| format!("Read JPEG: {e}"))?;
+    let _ = fs::remove_file(final_path);
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&jpg_data);
+    Ok(CaptureResult { base64: b64, app_name: format!("Display {display_idx}") })
 }
 
 /// Read the currently selected/highlighted text from any app via the clipboard.

@@ -399,8 +399,9 @@ const observeScreenTool = tool({
   name: "observe_screen",
   description:
     "Your ONE tool for looking at the user's screen. Pick the right mode:\n" +
-    "- 'full' (DEFAULT): Capture a screenshot. Use for: look at screen, translate, grammar, " +
-    "how many items, what level, summarize, count, explain, any question about page content.\n" +
+    "- 'full' (DEFAULT): Captures the ENTIRE display — you see ALL visible apps, windows, " +
+    "desktop, dock, menus. Use for: look at screen, translate, grammar, " +
+    "how many items, what level, summarize, count, explain, any question about what's visible.\n" +
     "- 'selection': Read exact highlighted text. ONLY when user says 'highlighting' or 'selected'.\n" +
     "When in doubt, use 'full'. It always works.\n\n" +
     "MULTI-MONITOR: The user has multiple displays. Use 'display' to look at a specific one:\n" +
@@ -408,13 +409,15 @@ const observeScreenTool = tool({
     "- display=2: Left external monitor\n" +
     "- display=3: Right external monitor\n" +
     "When user says 'look at my other screen', 'check the left monitor', 'what's on my laptop screen', etc. — use the appropriate display number.\n" +
-    "Omit display to use the current default (usually the main external monitor).",
+    "Omit display to use the current default (usually the main external monitor).\n\n" +
+    "FOCUS A SPECIFIC APP: Pass app_name to capture only that app's window (e.g. 'Notes', 'Chrome').\n" +
+    "Omit app_name to see the FULL screen with all apps (recommended for general questions).",
   parameters: z.object({
     mode: z.enum(["full", "selection"]).describe(
       "'full' = screenshot (DEFAULT for most questions). 'selection' = read highlighted text.",
     ),
     app_name: z.string().optional().describe(
-      "Only for mode='full'. App to capture, e.g. 'Chrome'. Omit for auto-detection.",
+      "Only for mode='full'. Capture a specific app window, e.g. 'Chrome', 'Notes'. Omit to see entire screen (all apps).",
     ),
     display: z.number().optional().describe(
       "Display index (1=laptop, 2=second monitor, 3=third monitor). Omit for default display.",
