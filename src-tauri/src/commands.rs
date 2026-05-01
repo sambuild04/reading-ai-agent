@@ -2046,6 +2046,68 @@ pub async fn flush_learning_audio() -> Result<(), String> {
 }
 
 /// Convert an m4a file to PCM16 24kHz mono base64 for Realtime API injection.
+/// Check if an audio file contains enough energy to likely contain speech.
+/// Decodes to raw PCM and computes RMS. Returns false if the audio is
+/// effectively silence (below -40dB), preventing Whisper hallucinations.
+fn audio_has_speech_energy(m4a_path: &str) -> bool {
+    let probe_pcm = "/tmp/samuel-energy-probe.pcm";
+    let _ = fs::remove_file(probe_pcm);
+
+    let output = Command::new("ffmpeg")
+        .args([
+            "-y", "-i", m4a_path,
+            "-ar", "16000",   // 16kHz is enough for energy detection
+            "-ac", "1",
+            "-f", "s16le",
+            probe_pcm,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+
+    let ok = match output {
+        Ok(o) if o.status.success() => true,
+        _ => { let _ = fs::remove_file(probe_pcm); return true; } // on error, let it through
+    };
+
+    if !ok { return true; }
+
+    let pcm_data = match fs::read(probe_pcm) {
+        Ok(d) => d,
+        Err(_) => return true,
+    };
+    let _ = fs::remove_file(probe_pcm);
+
+    if pcm_data.len() < 1600 { // < 50ms of audio at 16kHz/16bit
+        return false;
+    }
+
+    // Duration check: 16kHz mono s16le = 32000 bytes/sec
+    let duration_ms = (pcm_data.len() as u64 * 1000) / 32000;
+    if duration_ms < 400 {
+        eprintln!("[learning-audio] too short ({duration_ms}ms < 400ms), skipping");
+        return false;
+    }
+
+    // Compute RMS energy in dB
+    let samples: Vec<f64> = pcm_data
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]) as f64 / 32768.0)
+        .collect();
+
+    let sum_sq: f64 = samples.iter().map(|s| s * s).sum();
+    let rms = (sum_sq / samples.len() as f64).sqrt();
+    let rms_db = if rms > 0.0 { 20.0 * rms.log10() } else { -100.0 };
+
+    if rms_db < -40.0 {
+        eprintln!("[learning-audio] audio too quiet (RMS={rms_db:.1}dB < -40dB), skipping Whisper");
+        return false;
+    }
+
+    eprintln!("[learning-audio] energy OK (RMS={rms_db:.1}dB, {duration_ms}ms)");
+    true
+}
+
 fn convert_to_pcm_base64(m4a_path: &str) -> Option<String> {
     let pcm_path = format!("{m4a_path}.pcm");
     let output = Command::new("ffmpeg")
@@ -2073,13 +2135,14 @@ fn convert_to_pcm_base64(m4a_path: &str) -> Option<String> {
 
 /// Detect Whisper hallucinations that occur on silence, music, or noise.
 /// Whisper commonly generates: repetitive phrases, religious/philosophical text,
-/// single loanwords, or "thank you for watching" patterns.
+/// single loanwords, short casual phrases, or "thank you for watching" patterns.
 fn is_whisper_hallucination(text: &str) -> bool {
     let trimmed = text.trim();
 
-    // Single word or very short non-conversational fragments
+    // Short fragments (≤8 chars for CJK, ≤15 for Latin) are almost always hallucinations
+    // from ambient noise. Real conversational speech in media is longer.
     let char_count = trimmed.chars().count();
-    if char_count <= 4 {
+    if char_count <= 8 {
         return true;
     }
 
@@ -2098,6 +2161,12 @@ fn is_whisper_hallucination(text: &str) -> bool {
         "聖霊",                        // "Holy Spirit"
         "魂に注入",                     // "infused into souls"
         "amen",
+        "内緒だよ",                     // "it's a secret" — common hallucination
+        "本当に",                       // "really?" — common hallucination
+        "そうですね",                    // "that's right" — common hallucination
+        "なるほど",                      // "I see" — common hallucination
+        "どうしましたか",                 // "what happened?" — common hallucination
+        "ここで",                       // "here" — common hallucination
     ];
     let lower = trimmed.to_lowercase();
     if hallucination_markers.iter().any(|m| lower.contains(&m.to_lowercase())) {
@@ -2158,14 +2227,28 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
     }
 
     let size = fs::metadata(LEARNING_AUDIO_PATH).map(|m| m.len()).unwrap_or(0);
-    if size < 1000 {
+    // Clips under ~8KB are typically <1s of compressed audio — too short for real speech.
+    // Whisper hallucinates aggressively on these tiny clips.
+    if size < 8000 {
         let _ = fs::remove_file(LEARNING_AUDIO_PATH);
         let _ = start_learning_audio_internal();
-        eprintln!("[learning-audio] clip too small ({size}B)");
+        if size > 0 {
+            eprintln!("[learning-audio] clip too small ({:.1}KB < 8KB threshold), skipping", size as f64 / 1024.0);
+        }
         return Ok(empty);
     }
 
-    eprintln!("[learning-audio] clip: {:.1}KB, transcribing...", size as f64 / 1024.0);
+    eprintln!("[learning-audio] clip: {:.1}KB", size as f64 / 1024.0);
+
+    // Gate 1: Check audio energy and duration before calling Whisper.
+    // This prevents hallucinations on silence/near-silence.
+    if !audio_has_speech_energy(LEARNING_AUDIO_PATH) {
+        let _ = fs::remove_file(LEARNING_AUDIO_PATH);
+        let _ = start_learning_audio_internal();
+        return Ok(empty);
+    }
+
+    eprintln!("[learning-audio] transcribing...");
 
     // Map learning language name to ISO 639-1 code for Whisper
     let lang_code = match language.to_lowercase().as_str() {
