@@ -378,7 +378,13 @@ const observeScreenTool = tool({
     "- 'full' (DEFAULT): Capture a screenshot. Use for: look at screen, translate, grammar, " +
     "how many items, what level, summarize, count, explain, any question about page content.\n" +
     "- 'selection': Read exact highlighted text. ONLY when user says 'highlighting' or 'selected'.\n" +
-    "When in doubt, use 'full'. It always works.",
+    "When in doubt, use 'full'. It always works.\n\n" +
+    "MULTI-MONITOR: The user has multiple displays. Use 'display' to look at a specific one:\n" +
+    "- display=1: Built-in laptop screen\n" +
+    "- display=2: Left external monitor\n" +
+    "- display=3: Right external monitor\n" +
+    "When user says 'look at my other screen', 'check the left monitor', 'what's on my laptop screen', etc. — use the appropriate display number.\n" +
+    "Omit display to use the current default (usually the main external monitor).",
   parameters: z.object({
     mode: z.enum(["full", "selection"]).describe(
       "'full' = screenshot (DEFAULT for most questions). 'selection' = read highlighted text.",
@@ -386,22 +392,28 @@ const observeScreenTool = tool({
     app_name: z.string().optional().describe(
       "Only for mode='full'. App to capture, e.g. 'Chrome'. Omit for auto-detection.",
     ),
+    display: z.number().optional().describe(
+      "Display index (1=laptop, 2=second monitor, 3=third monitor). Omit for default display.",
+    ),
   }),
-  async execute({ mode, app_name }) {
+  async execute({ mode, app_name, display }) {
     if (mode === "selection") {
       const text = await invoke<string>("get_selected_text");
       if (!text || text.trim().length === 0) {
         return "No text selected. Ask the user to highlight something, or retry with mode='full'.";
       }
-      // Post-tool context reset: break recency bias toward selection mode
       return `Highlighted text: "${text.trim()}". Teach this word/phrase. [Selection context cleared — default back to mode='full' for next question.]`;
     }
 
     await sleep(200);
-    const result = await invoke<CaptureResult>("capture_active_window", { appName: app_name ?? null });
+    const result = await invoke<CaptureResult>("capture_active_window", {
+      appName: app_name ?? null,
+      display: display ?? null,
+    });
     sendImageToSession(result.base64);
     notifyScreenTarget(result.app_name);
-    return `Screenshot captured (${result.app_name}). Look at the image and answer the user's question.`;
+    const displayNote = display ? ` (display ${display})` : "";
+    return `Screenshot captured${displayNote} (${result.app_name}). Look at the image and answer the user's question.`;
   },
 });
 
@@ -1868,12 +1880,19 @@ Two modes: "full" (screenshot, DEFAULT) or "selection" (highlighted text only).
 Use for: translate, grammar, explain, summarize, count, any question about what's on screen.
 If user names an app ("look at my Chrome"), pass app_name. Otherwise auto-detects.
 
+MULTI-MONITOR: The user has multiple displays. Use the 'display' parameter to switch:
+- display=1: Built-in laptop screen
+- display=2: Second monitor (left external)
+- display=3: Third monitor (right external)
+When user says "look at my other screen", "check my laptop", "what's on the left monitor", etc. — pass the display number.
+Omit display to use the current default (auto-screen captures go there too).
+
 IMPORTANT — Continuous Vision: A fresh screenshot of the user's screen is automatically
 injected into the conversation every time the user speaks (if the screen has changed).
 This means you usually already have up-to-date visual context. Use it naturally — if the
 user says "what is this?" or "what about this sentence?", check the most recent image in
 context FIRST. Only call observe_screen explicitly if you need a specific app, selection
-mode, or if the conversation image seems stale/missing.
+mode, a DIFFERENT DISPLAY, or if the conversation image seems stale/missing.
 
 ## pronounce — Speak pronunciation
 Say word slowly, then naturally. Include accent/tone info.

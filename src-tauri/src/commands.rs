@@ -187,9 +187,19 @@ pub async fn create_ephemeral_key() -> Result<String, String> {
 
 /// Capture a window or display. If `app_name` is provided, target that app;
 /// otherwise use the default display chosen via the UI picker.
+/// If `display` index is provided, capture that specific display directly.
 #[tauri::command]
-pub async fn capture_active_window(app_name: Option<String>) -> Result<CaptureResult, String> {
-    capture_focused_window(app_name)
+pub async fn capture_active_window(app_name: Option<String>, display: Option<u32>) -> Result<CaptureResult, String> {
+    if let Some(idx) = display {
+        // Temporarily override the default display for this capture
+        let prev = DEFAULT_DISPLAY.load(Ordering::Relaxed);
+        DEFAULT_DISPLAY.store(idx, Ordering::Relaxed);
+        let result = capture_focused_window(None);
+        DEFAULT_DISPLAY.store(prev, Ordering::Relaxed);
+        result
+    } else {
+        capture_focused_window(app_name)
+    }
 }
 
 /// Set macOS system volume (0-100).
@@ -2030,22 +2040,28 @@ fn is_whisper_hallucination(text: &str) -> bool {
         return true;
     }
 
-    // Repetition detection: if the same short phrase repeats 3+ times
+    // Repetition detection: if the same short phrase repeats 3+ times.
+    // Use char indices to avoid panicking on multi-byte UTF-8 boundaries.
     if char_count > 10 {
-        let half = &trimmed[..trimmed.len() / 2];
-        let quarter_len = trimmed.len() / 4;
-        if quarter_len > 2 {
-            let chunk = &trimmed[..quarter_len];
-            let count = trimmed.matches(chunk).count();
-            if count >= 3 {
-                return true;
+        let quarter_chars = char_count / 4;
+        let half_chars = char_count / 2;
+        if quarter_chars > 2 {
+            let quarter_end = trimmed.char_indices()
+                .nth(quarter_chars)
+                .map(|(i, _)| i)
+                .unwrap_or(trimmed.len());
+            let chunk = &trimmed[..quarter_end];
+            if !chunk.is_empty() {
+                let count = trimmed.matches(chunk).count();
+                if count >= 3 {
+                    return true;
+                }
             }
         }
         // Same first and second half (doubled text)
-        if trimmed.len() > 10 {
-            let mid = trimmed.len() / 2;
-            let first = &trimmed[..mid];
-            let second = &trimmed[mid..];
+        if let Some((mid_byte, _)) = trimmed.char_indices().nth(half_chars) {
+            let first = &trimmed[..mid_byte];
+            let second = &trimmed[mid_byte..];
             if first == second {
                 return true;
             }
