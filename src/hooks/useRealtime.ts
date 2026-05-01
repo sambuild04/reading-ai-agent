@@ -300,12 +300,14 @@ export function useRealtime(): UseRealtimeReturn {
 
         case "input_audio_buffer.speech_stopped":
           setAgentState("thinking");
-          // Auto-inject a fresh screenshot — rate-limited to prevent flooding
-          // the session with images (which can exceed token limits and disconnect).
+          // Auto-inject a fresh screenshot — rate-limited and gated:
+          // 1. Skip until greeting has completed (agentResponseCount >= 1)
+          // 2. Respect 5s cooldown between injections
           {
             const now = Date.now();
             const elapsed = now - lastAutoScreenRef.current;
-            if (elapsed >= AUTO_SCREEN_COOLDOWN_MS) {
+            const pastGreeting = agentResponseCountRef.current >= 1;
+            if (pastGreeting && elapsed >= AUTO_SCREEN_COOLDOWN_MS) {
               lastAutoScreenRef.current = now;
               invoke<{ base64: string; app_name: string } | null>("capture_if_changed")
                 .then((result) => {
@@ -321,7 +323,7 @@ export function useRealtime(): UseRealtimeReturn {
                         }],
                       },
                     });
-                    console.log(`[auto-screen] screen changed (app=${result.app_name}), injecting`);
+                    console.log(`[auto-screen] injected (${result.app_name})`);
                   }
                 })
                 .catch(() => {});
@@ -692,6 +694,9 @@ export function useRealtime(): UseRealtimeReturn {
       isRotatingRef.current = false;
 
       agentResponseCountRef.current = 0;
+      // Suppress auto-screen for the first few seconds so the model can greet
+      // without being overwhelmed by an image on the very first speech_stopped.
+      lastAutoScreenRef.current = Date.now();
       session.mute(true);
 
       if (isReconnect) {
