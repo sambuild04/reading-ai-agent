@@ -1,6 +1,6 @@
-# Samuel — open-source voice AI agent that sees your screen, browses the web, writes its own tools, and fixes them when they break
+# Samuel — the AI that works with you, not for you
 
-An always-on voice AI desktop assistant for macOS that watches your screen, listens to audio, browses the web like a human, generates its own plugins with GPT-5.5 reasoning, and auto-repairs them when they fail. Built with Tauri v2, React, TypeScript, and Playwright. MIT licensed.
+An always-on voice AI desktop assistant for macOS that sees your screen, hears your audio, browses the web in the background, writes its own tools, and fixes them when they break — all without ever stealing your cursor or interrupting your flow. Built with Tauri v2, React, TypeScript, and Playwright. MIT licensed.
 
 **Use cases:** ambient language learning, voice-controlled web browsing, self-building AI tools, hands-free desktop automation, live meeting interpretation, real-time video translation, AI tutoring, email/calendar access via browser automation, ambient monitoring ("tell me when you see/hear X").
 
