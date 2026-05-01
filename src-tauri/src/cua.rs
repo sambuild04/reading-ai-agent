@@ -3,11 +3,12 @@
 //! Implements the GPT-5.5 computer tool loop via the Responses API:
 //! 1. Send task + screenshot to GPT-5.5 with `tools: [{ type: "computer" }]`
 //! 2. Receive `computer_call` with `actions[]`
-//! 3. Execute each action on the Playwright sidecar via `browser_command`
+//! 3. Execute each action on the ISOLATED CUA browser (separate from user's Chrome)
 //! 4. Capture updated screenshot → send as `computer_call_output`
 //! 5. Repeat until the model stops returning `computer_call`
 //!
-//! The existing browser.rs Playwright sidecar handles action execution.
+//! Uses cua_browser.rs (isolated Chrome profile) so computer_use never
+//! steals the user's cursor or disrupts their active browser tabs.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -44,9 +45,9 @@ pub async fn cua_run(task: String, url: Option<String>) -> Result<CuaResult, Str
     let config = crate::commands::read_config_internal()?;
     let api_key = config.api_key.ok_or("No API key configured")?;
 
-    // Ensure browser is open; navigate if URL given
+    // Ensure isolated CUA browser is open; navigate if URL given
     if let Some(ref u) = url {
-        crate::browser::browser_command("open".into(), serde_json::json!({ "url": u })).await?;
+        crate::cua_browser::cua_browser_command("open".into(), serde_json::json!({ "url": u })).await?;
     }
 
     // Take initial screenshot
@@ -161,7 +162,7 @@ struct Screenshot {
 }
 
 async fn take_screenshot() -> Result<Screenshot, String> {
-    let result = crate::browser::browser_command(
+    let result = crate::cua_browser::cua_browser_command(
         "cua_screenshot".into(),
         serde_json::Value::Object(serde_json::Map::new()),
     )
@@ -208,13 +209,13 @@ async fn execute_cua_action(action: &serde_json::Value) -> Result<(), String> {
                 "button": button,
                 "keys": keys,
             });
-            crate::browser::browser_command("cua_click".into(), params).await?;
+            crate::cua_browser::cua_browser_command("cua_click".into(), params).await?;
         }
         "double_click" => {
             let x = action.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let y = action.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let params = serde_json::json!({ "x": x as i32, "y": y as i32 });
-            crate::browser::browser_command("cua_double_click".into(), params).await?;
+            crate::cua_browser::cua_browser_command("cua_double_click".into(), params).await?;
         }
         "type" => {
             let text = action
@@ -222,7 +223,7 @@ async fn execute_cua_action(action: &serde_json::Value) -> Result<(), String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let params = serde_json::json!({ "text": text });
-            crate::browser::browser_command("cua_type".into(), params).await?;
+            crate::cua_browser::cua_browser_command("cua_type".into(), params).await?;
         }
         "keypress" => {
             let keys = action
@@ -231,7 +232,7 @@ async fn execute_cua_action(action: &serde_json::Value) -> Result<(), String> {
                 .map(|a| a.iter().filter_map(|k| k.as_str().map(String::from)).collect::<Vec<_>>())
                 .unwrap_or_default();
             let params = serde_json::json!({ "keys": keys });
-            crate::browser::browser_command("cua_keypress".into(), params).await?;
+            crate::cua_browser::cua_browser_command("cua_keypress".into(), params).await?;
         }
         "scroll" => {
             let x = action.get("x").and_then(|v| v.as_f64()).unwrap_or(640.0);
@@ -246,7 +247,7 @@ async fn execute_cua_action(action: &serde_json::Value) -> Result<(), String> {
                 .unwrap_or(0.0);
             let params =
                 serde_json::json!({ "x": x as i32, "y": y as i32, "scroll_x": sx as i32, "scroll_y": sy as i32 });
-            crate::browser::browser_command("cua_scroll".into(), params).await?;
+            crate::cua_browser::cua_browser_command("cua_scroll".into(), params).await?;
         }
         "drag" => {
             let path = action
@@ -254,18 +255,18 @@ async fn execute_cua_action(action: &serde_json::Value) -> Result<(), String> {
                 .cloned()
                 .unwrap_or(serde_json::Value::Array(vec![]));
             let params = serde_json::json!({ "path": path });
-            crate::browser::browser_command("cua_drag".into(), params).await?;
+            crate::cua_browser::cua_browser_command("cua_drag".into(), params).await?;
         }
         "move" => {
             let x = action.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let y = action.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let params = serde_json::json!({ "x": x as i32, "y": y as i32 });
-            crate::browser::browser_command("cua_move".into(), params).await?;
+            crate::cua_browser::cua_browser_command("cua_move".into(), params).await?;
         }
         "wait" => {
             let ms = action.get("ms").and_then(|v| v.as_u64()).unwrap_or(2000);
             let params = serde_json::json!({ "ms": ms });
-            crate::browser::browser_command("cua_wait".into(), params).await?;
+            crate::cua_browser::cua_browser_command("cua_wait".into(), params).await?;
         }
         "screenshot" => {
             // Model just wants a screenshot; we always send one after the batch

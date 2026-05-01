@@ -1336,21 +1336,25 @@ interface CuaResult {
 const computerUseTool = tool({
   name: "computer_use",
   description:
-    "Let GPT-5.5 visually operate the browser — it can see the screen and click/type/scroll like a human.\n" +
-    "Use for ANY complex browser task: sign into services, fill forms, navigate multi-step workflows,\n" +
+    "Let GPT-5.5 visually operate a BACKGROUND browser — it can see the screen and click/type/scroll.\n" +
+    "IMPORTANT: This runs in an ISOLATED Chrome window that does NOT touch the user's browser.\n" +
+    "The user keeps working uninterrupted. Never steals focus or cursor.\n\n" +
+    "Use for ANY complex web task: search + select results, fill forms, navigate workflows,\n" +
     "read dashboards, or complete tasks that need visual understanding.\n\n" +
     "This is FAR more capable than browser_use because GPT-5.5 can SEE the page screenshots\n" +
     "and decide where to click, what to type, etc. It handles unexpected popups, login walls,\n" +
     "CAPTCHAs (asks user), and layout changes automatically.\n\n" +
     "WHEN TO USE:\n" +
-    "- User says 'check my email', 'go to LinkedIn', 'order from Amazon' → computer_use\n" +
+    "- User says 'play music', 'find a video', 'search for X' → computer_use\n" +
     "- Complex multi-step web tasks (booking, shopping, form filling) → computer_use\n" +
     "- Any task where you need to SEE what's on the page → computer_use\n\n" +
     "WHEN NOT TO USE:\n" +
-    "- Simple URL open + text extraction → browser_use is faster\n" +
+    "- Simple URL open + text extraction (needs user's logins) → browser_use is faster\n" +
+    "- Native app operations → use open_app\n" +
     "- Non-browser tasks → use other tools\n\n" +
     "The model runs in a loop: screenshot → plan → act → screenshot → ... until done.\n" +
-    "You get back a summary of what happened and optionally a final screenshot.",
+    "You get back a summary of what happened and optionally a final screenshot.\n" +
+    "Tell the user: 'I'll handle that in the background' before starting.",
   parameters: z.object({
     task: z.string().describe(
       "Natural language description of what to do. Be specific. " +
@@ -2005,28 +2009,31 @@ Common scopes:
   GitHub: "repo read:user"
   Spotify: "user-read-playback-state user-library-read"
 
-## computer_use — GPT-5.5 visual browser agent (MOST POWERFUL — use for complex tasks)
-Delegates to GPT-5.5's built-in computer use: it sees screenshots and operates the browser autonomously.
-IMPORTANT: This operates the user's REAL Chrome browser — they're already signed into everything.
-No re-login needed for Gmail, DoorDash, LinkedIn, bank, etc. Their cookies and sessions are there.
-Use for ANY complex browser workflow: check emails, place orders, fill forms, navigate dashboards.
+## computer_use — GPT-5.5 visual browser agent (BACKGROUND, never steals focus)
+Delegates to GPT-5.5's built-in computer use: it sees screenshots and operates a browser autonomously.
+IMPORTANT: This runs in an ISOLATED browser in the background — it does NOT touch the user's
+real Chrome. The user keeps working uninterrupted while computer_use operates.
+- Runs in its own Chrome window with its own profile
+- Never steals the user's cursor or active tab
+- No access to user's logins (if login needed, CUA navigates there visually)
 GPT-5.5 visually understands the page and handles popups, layout changes automatically.
 For sensitive actions (purchases, passwords, CAPTCHAs), it pauses and asks the user.
 WORKFLOW:
-  1. computer_use(task="Go to Gmail and summarize my unread emails", url="https://mail.google.com")
-  2. Tell the user "I'm opening Gmail in your Chrome now, sir."
+  1. Tell the user "I'll do that in the background, sir."
+  2. computer_use(task="...", url="https://...")
   3. The model loops: screenshot → plan → act → screenshot → ... until done
   4. You get back a summary + final screenshot
   5. Present the results to the user (use show_content for visual display)
 ALWAYS prefer computer_use over browser_use for complex multi-step tasks.
-browser_use is still fine for simple open+read tasks.
+browser_use is still fine for simple open+read tasks that need the user's logged-in sessions.
 
-## browser_use — Simple browser commands (use for quick tasks)
+## browser_use — Simple browser commands (user's real Chrome, has their logins)
 Control the user's real Chrome with individual commands. Good for simple URL open + read tasks.
 The user's existing logins/sessions are available — no need to ask them to sign in again.
 Actions: open, goto, read_page, read_structure, click, type, press, screenshot, scroll, wait, list_tabs, switch_tab, close_tab, close.
 Use browser_use when you just need to: open a URL, read page text, click a single link.
-For anything complex (multi-step navigation, forms, dashboards), prefer computer_use instead.
+NOTE: This DOES open tabs in the user's Chrome. Use sparingly for quick reads only.
+For anything complex (multi-step navigation, forms, dashboards), prefer computer_use (background).
 
 ## web_browse — Search the internet or read pages
 action="search": Web search via Google. Returns titles, URLs, snippets. Supports page= for pagination.

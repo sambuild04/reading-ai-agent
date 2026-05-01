@@ -1,6 +1,7 @@
 mod browser;
 mod commands;
 mod cua;
+mod cua_browser;
 mod flashcards;
 mod memory;
 mod oauth;
