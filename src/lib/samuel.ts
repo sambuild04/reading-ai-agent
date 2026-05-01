@@ -7,6 +7,7 @@ import { loadPlugin, triggerRepair, getLastExecution } from "./plugin-loader";
 interface CaptureResult {
   base64: string;
   app_name: string;
+  display_context?: string;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -440,7 +441,8 @@ const observeScreenTool = tool({
     sendImageToSession(result.base64);
     notifyScreenTarget(result.app_name);
     const displayNote = display ? ` (display ${display})` : "";
-    return `Screenshot captured${displayNote} (${result.app_name}). Look at the image and answer the user's question.`;
+    const layoutNote = result.display_context ? `\n[All displays: ${result.display_context}]` : "";
+    return `Screenshot captured${displayNote} (${result.app_name}). Look at the image and answer the user's question.${layoutNote}`;
   },
 });
 

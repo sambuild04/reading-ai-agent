@@ -85,6 +85,8 @@ pub fn cleanup_temp_files() {
 pub struct CaptureResult {
     pub base64: String,
     pub app_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_context: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -253,6 +255,58 @@ pub async fn capture_if_changed() -> Result<Option<CaptureResult>, String> {
     Ok(Some(capture))
 }
 
+/// Get a text summary of which apps are visible on which displays.
+/// Returns something like: "Display 1: Notes, Safari | Display 2: Chrome | Display 3: VS Code, Terminal"
+fn get_display_layout_summary() -> Option<String> {
+    let script = r#"tell application "System Events"
+  set appList to name of every application process whose visible is true
+  set output to ""
+  repeat with a in appList
+    set output to output & a & linefeed
+  end repeat
+  return output
+end tell"#;
+    let output = Command::new("/usr/bin/osascript")
+        .args(["-e", script])
+        .output()
+        .ok()?;
+    if !output.status.success() { return None; }
+    let raw = String::from_utf8_lossy(&output.stdout);
+
+    let skip = ["samuel", "cursor", "electron", "windowserver", "dock", "systemiuserver", "finder"];
+    let apps: Vec<String> = raw.lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty() && !skip.iter().any(|s| l.to_lowercase().contains(s)))
+        .collect();
+
+    if apps.is_empty() { return None; }
+
+    // Try to locate each app on a display
+    let mut by_display: std::collections::HashMap<u32, Vec<String>> = std::collections::HashMap::new();
+    let mut unplaced = Vec::new();
+    for app in &apps {
+        if let Some(d) = find_display_for_app(app) {
+            by_display.entry(d).or_default().push(app.clone());
+        } else {
+            unplaced.push(app.clone());
+        }
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    let mut keys: Vec<u32> = by_display.keys().copied().collect();
+    keys.sort();
+    for k in keys {
+        if let Some(apps) = by_display.get(&k) {
+            parts.push(format!("Display {k}: {}", apps.join(", ")));
+        }
+    }
+    if !unplaced.is_empty() {
+        parts.push(format!("(also open: {})", unplaced.join(", ")));
+    }
+
+    if parts.is_empty() { None } else { Some(parts.join(" | ")) }
+}
+
 /// Captures the entire default display (full screen, all apps visible).
 fn capture_full_display() -> Result<CaptureResult, String> {
     let tmp_png = "/tmp/samuel-autoscreen.png";
@@ -299,8 +353,10 @@ fn capture_full_display() -> Result<CaptureResult, String> {
     eprintln!("[capture] full-display JPEG: {} bytes", jpg_data.len());
     let _ = fs::remove_file(final_path);
 
+    let layout = get_display_layout_summary();
+
     let b64 = base64::engine::general_purpose::STANDARD.encode(&jpg_data);
-    Ok(CaptureResult { base64: b64, app_name: format!("Display {display_idx}") })
+    Ok(CaptureResult { base64: b64, app_name: format!("Display {display_idx}"), display_context: layout })
 }
 
 /// Read the currently selected/highlighted text from any app via the clipboard.
@@ -597,7 +653,7 @@ end tell"#;
     };
 
     let b64 = base64::engine::general_purpose::STANDARD.encode(&jpg_data);
-    Ok(CaptureResult { base64: b64, app_name: label })
+    Ok(CaptureResult { base64: b64, app_name: label, display_context: None })
 }
 
 /// PLACEHOLDER_CUA_START

@@ -309,21 +309,20 @@ export function useRealtime(): UseRealtimeReturn {
             const pastGreeting = agentResponseCountRef.current >= 1;
             if (pastGreeting && elapsed >= AUTO_SCREEN_COOLDOWN_MS) {
               lastAutoScreenRef.current = now;
-              invoke<{ base64: string; app_name: string } | null>("capture_if_changed")
+              invoke<{ base64: string; app_name: string; display_context?: string } | null>("capture_if_changed")
                 .then((result) => {
                   if (result && sessionRef.current) {
+                    const content: Array<Record<string, string>> = [
+                      { type: "input_image", image_url: `data:image/jpeg;base64,${result.base64}` },
+                    ];
+                    if (result.display_context) {
+                      content.push({ type: "input_text", text: `[Screen layout: ${result.display_context}]` });
+                    }
                     sessionRef.current.transport.sendEvent({
                       type: "conversation.item.create",
-                      item: {
-                        type: "message",
-                        role: "user",
-                        content: [{
-                          type: "input_image",
-                          image_url: `data:image/jpeg;base64,${result.base64}`,
-                        }],
-                      },
+                      item: { type: "message", role: "user", content },
                     });
-                    console.log(`[auto-screen] injected (${result.app_name})`);
+                    console.log(`[auto-screen] injected (${result.app_name})${result.display_context ? ` [${result.display_context}]` : ""}`);
                   }
                 })
                 .catch(() => {});
