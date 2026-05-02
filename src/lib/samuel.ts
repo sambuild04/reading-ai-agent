@@ -1227,9 +1227,10 @@ interface BrowserResult { ok: boolean; data: Record<string, unknown>; }
 const browserUseTool = tool({
   name: "browser_use",
   description:
-    "Control the user's real Chrome browser. Opens tabs in their actual Chrome with existing logins.\n" +
-    "The user is ALREADY signed in to their services — no re-login needed.\n" +
-    "For complex multi-step tasks, prefer computer_use instead (GPT-5.5 visual agent).\n\n" +
+    "Control the user's REAL Chrome browser — with their existing cookies, logins, and sessions.\n" +
+    "The user is ALREADY signed in to Gmail, social media, etc. — no re-login needed.\n" +
+    "USE THIS for anything requiring authentication: email, social feeds, banking, dashboards.\n" +
+    "Only use computer_use (isolated browser) for public sites that don't need login.\n\n" +
     "Actions:\n" +
     "- 'open': Open a URL in a new browser tab. Use to start browsing.\n" +
     "- 'goto': Navigate the current tab to a new URL.\n" +
@@ -1351,10 +1352,12 @@ const computerUseTool = tool({
     "CAPTCHAs (asks user), and layout changes automatically.\n\n" +
     "WHEN TO USE:\n" +
     "- User says 'play music', 'find a video', 'search for X' → computer_use\n" +
-    "- Complex multi-step web tasks (booking, shopping, form filling) → computer_use\n" +
-    "- Any task where you need to SEE what's on the page → computer_use\n\n" +
-    "WHEN NOT TO USE:\n" +
-    "- Simple URL open + text extraction (needs user's logins) → browser_use is faster\n" +
+    "- Complex multi-step tasks on PUBLIC sites (no login needed) → computer_use\n" +
+    "- Any task where you need to SEE what's on the page visually → computer_use\n\n" +
+    "WHEN NOT TO USE (use browser_use instead):\n" +
+    "- ANYTHING requiring user's logins (Gmail, social media, bank, etc.) → browser_use\n" +
+    "- 'Check my email', 'read my messages', 'look at my feed' → browser_use\n" +
+    "- The user is ALREADY signed in on their real Chrome → browser_use has their cookies\n" +
     "- Native app operations → use open_app\n" +
     "- Non-browser tasks → use other tools\n\n" +
     "The model runs in a loop: screenshot → plan → act → screenshot → ... until done.\n" +

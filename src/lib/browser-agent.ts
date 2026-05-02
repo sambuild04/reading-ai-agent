@@ -55,13 +55,33 @@ async function ensureBrowser(): Promise<Browser> {
   }
 
   const chromePath = findChromeExecutable();
-  process.stderr.write(`[browser-agent] launching Chrome: ${chromePath}\n`);
+
+  // Strategy: connect to the user's ALREADY-RUNNING Chrome by enabling remote debugging.
+  // On macOS, we can relaunch Chrome with the debug flag — it will reuse the existing instance.
+  try {
+    execSync(
+      `open -a "Google Chrome" --args --remote-debugging-port=9222`,
+      { stdio: "ignore", timeout: 5000 }
+    );
+    // Give Chrome a moment to enable the debug port
+    await new Promise(r => setTimeout(r, 2000));
+    browser = await puppeteer.connect({
+      browserURL: "http://127.0.0.1:9222",
+      defaultViewport: null,
+    });
+    process.stderr.write("[browser-agent] connected to user's Chrome via remote debugging\n");
+    return browser;
+  } catch (e) {
+    process.stderr.write(`[browser-agent] could not connect to user's Chrome: ${e}\n`);
+  }
+
+  // Final fallback: launch a fresh Chrome (won't have user's logins)
+  process.stderr.write(`[browser-agent] launching fresh Chrome: ${chromePath}\n`);
 
   browser = await puppeteer.launch({
     executablePath: chromePath,
     headless: false,
     defaultViewport: null,
-    // Use default profile so user has their logins
     userDataDir: undefined,
     args: [
       "--remote-debugging-port=9222",
