@@ -58,6 +58,8 @@ pub fn run() {
             capture_if_changed,
             capture_screen_now,
             open_app,
+            read_app_content,
+            list_app_windows,
             set_system_volume,
             get_config,
             transcribe_audio,

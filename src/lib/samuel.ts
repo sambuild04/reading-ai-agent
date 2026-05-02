@@ -270,6 +270,50 @@ const openAppTool = tool({
 });
 
 // ---------------------------------------------------------------------------
+// Read App Content (AX Tree) — same approach as Codex Desktop
+// ---------------------------------------------------------------------------
+
+const readAppTool = tool({
+  name: "read_app",
+  description:
+    "Read the CONTENT of any macOS application using the Accessibility Tree.\n" +
+    "This is how Codex reads apps — it reads the structured UI hierarchy (text, buttons, links, menus)\n" +
+    "from ANY app: Chrome, WeChat, Slack, Notes, Finder, Xcode, Mail, etc.\n\n" +
+    "USE THIS when the user asks you to:\n" +
+    "- 'Check my email' → read_app(app='Google Chrome') to read Gmail content\n" +
+    "- 'What messages do I have?' → read_app(app='WeChat') or read_app(app='Slack')\n" +
+    "- 'What's in my notes?' → read_app(app='Notes')\n" +
+    "- 'Read this page' → read_app() to read whatever app is focused\n\n" +
+    "Returns structured text with roles like [button], [link], [text], [heading], etc.\n" +
+    "Much more reliable than screenshots for reading actual text content.\n\n" +
+    "Omit 'app' to read the currently focused application.\n" +
+    "Use 'list_windows' to see all open app windows first if unsure which app to read.",
+  parameters: z.object({
+    app: z.string().optional().describe(
+      "App name to read (e.g. 'Google Chrome', 'WeChat', 'Slack', 'Notes'). Omit for focused app.",
+    ),
+    list_windows: z.boolean().optional().describe(
+      "If true, lists all open windows across all apps instead of reading content.",
+    ),
+  }),
+  async execute({ app, list_windows }) {
+    try {
+      if (list_windows) {
+        const windows = await invoke<string>("list_app_windows");
+        return toolOk(`Open windows:\n${windows}`);
+      }
+      const content = await invoke<string>("read_app_content", { appName: app ?? null });
+      if (!content || content.trim().length === 0) {
+        return toolErr("empty", `No content found in ${app || "focused app"}. The app may not expose accessibility data.`);
+      }
+      return toolOk(content);
+    } catch (e) {
+      return toolErr("ax_error", `Could not read app: ${e}`);
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Watch / Alert System
 // ---------------------------------------------------------------------------
 
@@ -1779,10 +1823,11 @@ Keep narration conversational, not technical. Don't over-narrate single-step ope
 
 # Your Complete Toolkit — Know what you have
 ALWAYS check this list before saying you cannot do something:
-- observe_screen: See what's on the user's screen (full screen or selected text)
+- read_app: Read content from ANY macOS app (Chrome, WeChat, Slack, Notes, etc.) via Accessibility Tree
+- observe_screen: See what's on the user's screen visually (screenshot)
 - web_browse: Search the internet (search, deep_search, read any URL)
 - computer_use: GPT-5.5 visual agent — operates an ISOLATED browser for PUBLIC sites (no user logins)
-- browser_use: Simple browser commands (open URL, read page, click, type, screenshot)
+- browser_use: Control user's Chrome (navigate, click, type) — has their logins
 - show_content: Display anything in a floating panel (HTML, search results, data, summaries)
 - update_ui / query_ui_state: Change any visual property of the app
 - plugin_manage: Create new tools (propose, write, repair, remove, list)
@@ -1879,13 +1924,20 @@ ALWAYS try the next fallback BEFORE telling the user something failed.
 2. observe_screen(mode="selection") — if user can highlight the text
 3. Ask user to describe what they see.
 
-## Accessing a web service (Gmail, LinkedIn, bank, any website the user is LOGGED INTO):
-1. browser_use — controls the user's REAL Chrome with their existing cookies/logins
-2. Tell user "Let me check that for you, sir." (they're already signed in — no re-login needed)
-3. browser_use reads page content, navigates, clicks links — all in the user's actual browser
-4. Present results to user via voice summary + show_content panel if visual
+## Reading content from ANY app (Gmail, WeChat, Slack, Notes, etc.):
+1. read_app(app="Google Chrome") — reads text content via Accessibility Tree (like Codex does)
+2. read_app(app="WeChat") — reads WeChat messages, chat list, etc.
+3. read_app(app="Slack") — reads Slack channels, messages
+4. read_app() — reads whatever app is currently focused
+5. read_app(list_windows=true) — shows all open app windows to find what to read
+This works for ANY macOS app, not just Chrome. No browser automation needed for reading.
+Present results to user via voice summary + show_content panel if visual.
+FALLBACK: If read_app returns empty, try observe_screen for a visual screenshot.
+
+## Interacting with Chrome (clicking, typing, navigating):
+1. browser_use — controls the user's real Chrome for click/type/navigate actions
+2. Only needed when you must INTERACT, not just read. For reading, use read_app instead.
 IMPORTANT: NEVER use computer_use for sites requiring login — it runs in an ISOLATED browser with NO cookies.
-FALLBACK: If browser_use fails, try observe_screen to read what's already visible on screen.
 Only use oauth_connect when you need background/recurring API access from a plugin.
 
 ## Tool call failed (any tool):
@@ -2040,18 +2092,23 @@ WORKFLOW:
   4. You get back a summary + final screenshot
   5. Present the results to the user (use show_content for visual display)
 ROUTING RULE:
-- Site needs LOGIN (email, social, bank, dashboard) → browser_use (has user's real cookies)
+- READING content from any app → read_app (fastest, works on ANY macOS app)
+- INTERACTING with Chrome (click/type/navigate) → browser_use
 - PUBLIC site needing visual judgment (YouTube, shopping, maps) → computer_use (isolated browser)
 NEVER use computer_use for sites the user is logged into — it has NO cookies, NO logins.
 
-## browser_use — Simple browser commands (user's real Chrome, has their logins)
-Control the user's real Chrome with individual commands. Good for simple URL open + read tasks.
-The user's existing logins/sessions are available — no need to ask them to sign in again.
+## read_app — Read content from ANY macOS app (Accessibility Tree)
+Reads the structured UI hierarchy of any running app — like Codex does.
+Works on Chrome, WeChat, Slack, Notes, Finder, Mail, Xcode, and any other macOS app.
+Returns text content with roles ([button], [link], [heading], [text], [Cell], etc.).
+USE THIS FIRST for any "check my email", "what messages do I have", "read this" requests.
+Much faster and more reliable than browser_use for reading content.
+read_app(list_windows=true) shows all open app windows if you're unsure which app has the content.
+
+## browser_use — Chrome interaction (click, type, navigate, fill forms)
+Controls the user's Chrome for INTERACTION tasks only (clicking, typing, form filling).
+For READING content, always use read_app instead — it's faster and doesn't need browser automation.
 Actions: open, goto, read_page, read_structure, click, type, press, screenshot, scroll, wait, list_tabs, switch_tab, close_tab, close.
-Use browser_use when you just need to: open a URL, read page text, click a single link.
-This controls the user's REAL Chrome via AppleScript — it has their cookies, logins, and sessions.
-Use for ANY site requiring authentication (Gmail, social media, bank, dashboards, etc.).
-For PUBLIC sites needing visual judgment (YouTube search results, shopping), use computer_use instead.
 
 ## web_browse — Search the internet or read pages
 action="search": Web search via Google. Returns titles, URLs, snippets. Supports page= for pagination.
@@ -2163,7 +2220,7 @@ When the user is struggling or using a suboptimal path, suggest the shortcut —
 - Describes a tool → Propose it with plugin_manage.
 - Provides API key → Store it with store_secret.
 - Wants to open a native app (CapCut, Spotify, Notes, Finder, etc.) → open_app. NEVER use browser for this.
-- Wants to check email/social/bank → browser_use (has user's logins). NEVER computer_use for logged-in sites.
+- Wants to check email/social/chat/notes → read_app (reads ANY app). For Chrome interaction (click/type), use browser_use.
 - Wants to pick/select something visually (video, product, restaurant, image) → computer_use with specific criteria (public sites only).
 - Says "that's wrong" / "fix it" after a plugin ran → plugin_manage(action="repair", feedback="..."). Don't rewrite from scratch — diagnose first.
 - Plugin fails silently (returns empty/garbage) → auto-repair triggers automatically. If it can't fix it, explain what went wrong clearly.
@@ -2173,8 +2230,9 @@ When the user is struggling or using a suboptimal path, suggest the shortcut —
 # Self-Aware Problem Solving
 You have a powerful and composable toolkit. When faced with ANY request, mentally map it to your tools:
 | User wants... | Your approach |
+| Read content from any app (email, chat, notes) | read_app — reads ANY macOS app via AX tree |
 | Open/launch a native app | open_app (CapCut, Spotify, Terminal, etc.) |
-| Check a LOGGED-IN site (email, social, bank) | browser_use (has user's real cookies/logins) |
+| Interact with Chrome (click, type, navigate) | browser_use (has user's real cookies/logins) |
 | Pick/select something visually on PUBLIC site | computer_use with criteria (video, product, restaurant) |
 | Data from an API | web_browse to find the API → plugin_manage to build a tool |
 | Display information visually | show_content panel |
@@ -2242,6 +2300,8 @@ export const samuelAgent = new RealtimeAgent({
     volumeTool,
     // Open native apps
     openAppTool,
+    // Read content from any app (AX tree)
+    readAppTool,
     // Watch / alerts
     watchTool,
     // Songs (play/pause/lyrics/refetch/correct)

@@ -221,6 +221,74 @@ pub async fn open_app(name: String) -> Result<String, String> {
     Ok(format!("{name} opened."))
 }
 
+/// Read the macOS Accessibility Tree from any app — same approach Codex uses.
+/// Returns structured text content (roles, titles, values) from the app's UI hierarchy.
+#[tauri::command]
+pub async fn read_app_content(app_name: Option<String>) -> Result<String, String> {
+    let helper = std::env::current_dir()
+        .unwrap_or_default()
+        .join("helpers")
+        .join("read-ax-tree");
+
+    // Fall back to common locations if not found
+    let helper_path = if helper.exists() {
+        helper
+    } else {
+        let alt = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("helpers")
+            .join("read-ax-tree");
+        if alt.exists() { alt } else { helper }
+    };
+
+    let mut args: Vec<String> = Vec::new();
+    if let Some(ref name) = app_name {
+        args.push("--app".to_string());
+        args.push(name.clone());
+    }
+
+    let output = Command::new(helper_path.to_str().unwrap_or("helpers/read-ax-tree"))
+        .args(&args)
+        .output()
+        .map_err(|e| format!("read-ax-tree: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("AX tree read failed: {stderr}"));
+    }
+
+    let content = String::from_utf8_lossy(&output.stdout).to_string();
+    let app_label = app_name.as_deref().unwrap_or("focused app");
+    eprintln!("[ax-tree] read {} ({} chars)", app_label, content.len());
+    Ok(content)
+}
+
+/// List all open windows across all apps via the AX tree.
+#[tauri::command]
+pub async fn list_app_windows() -> Result<String, String> {
+    let helper = std::env::current_dir()
+        .unwrap_or_default()
+        .join("helpers")
+        .join("read-ax-tree");
+
+    let helper_path = if helper.exists() {
+        helper
+    } else {
+        let alt = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("helpers")
+            .join("read-ax-tree");
+        if alt.exists() { alt } else { helper }
+    };
+
+    let output = Command::new(helper_path.to_str().unwrap_or("helpers/read-ax-tree"))
+        .args(["--list-windows"])
+        .output()
+        .map_err(|e| format!("read-ax-tree: {e}"))?;
+
+    let content = String::from_utf8_lossy(&output.stdout).to_string();
+    eprintln!("[ax-tree] listed windows: {} lines", content.lines().count());
+    Ok(content)
+}
+
 /// Set macOS system volume (0-100).
 #[tauri::command]
 pub async fn set_system_volume(volume: u32) -> Result<(), String> {
