@@ -175,12 +175,28 @@ async function extractStructure(page: Page): Promise<string> {
   });
 }
 
+// Restore focus to whatever app was active before an AppleScript command
+function restoreFocus(previousApp: string) {
+  if (previousApp) {
+    try { osascript(`tell application "${previousApp}" to activate`); } catch { /* best effort */ }
+  }
+}
+
+function getFrontmostApp(): string {
+  try {
+    return osascript(`tell application "System Events" to name of first application process whose frontmost is true`);
+  } catch { return ""; }
+}
+
 // AppleScript-based Chrome control — works with the user's already-running Chrome
 async function handleAppleScriptCommand(cmd: { id: string; action: string; [k: string]: unknown }) {
+  const prevApp = getFrontmostApp();
+
   switch (cmd.action) {
     case "open": {
       const url = cmd.url as string || "about:blank";
       osascript(`tell application "Google Chrome" to make new tab at end of tabs of front window with properties {URL:"${url}"}`);
+      restoreFocus(prevApp);
       await new Promise(r => setTimeout(r, 2000));
       const title = osascript(`tell application "Google Chrome" to title of active tab of front window`);
       reply(cmd.id, true, { tabId: 1, title, url, message: `Opened: ${title}` });
