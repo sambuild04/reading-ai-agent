@@ -39,8 +39,36 @@ function findChromeExecutable(): string {
   return candidates[0];
 }
 
+// Whether we're using AppleScript (controls user's real Chrome) or Puppeteer (new instance)
+let useAppleScript = false;
+
+function osascript(script: string): string {
+  return execSync(`/usr/bin/osascript -e '${script.replace(/'/g, "'\\''")}'`, {
+    encoding: "utf-8",
+    timeout: 15000,
+  }).trim();
+}
+
+function chromeIsRunning(): boolean {
+  try {
+    const result = execSync(
+      `osascript -e 'tell application "System Events" to (name of processes) contains "Google Chrome"'`,
+      { encoding: "utf-8", timeout: 5000 }
+    ).trim();
+    return result === "true";
+  } catch { return false; }
+}
+
 async function ensureBrowser(): Promise<Browser> {
   if (browser?.connected) return browser;
+
+  // If Chrome is already running, use AppleScript to control it directly.
+  // This gives access to the user's existing logins/cookies without needing debug port.
+  if (chromeIsRunning()) {
+    useAppleScript = true;
+    process.stderr.write("[browser-agent] Chrome already running — using AppleScript mode (has user's logins)\n");
+    return null as unknown as Browser; // AppleScript mode doesn't need a Browser object
+  }
 
   // Try connecting to an already-running Chrome with debug port
   try {
@@ -51,32 +79,12 @@ async function ensureBrowser(): Promise<Browser> {
     process.stderr.write("[browser-agent] connected to existing Chrome on :9222\n");
     return browser;
   } catch {
-    // No debuggable Chrome running — launch one
+    // No debuggable Chrome running
   }
 
+  // Fallback: launch Chrome with the user's profile so it has their cookies
   const chromePath = findChromeExecutable();
-
-  // Strategy: connect to the user's ALREADY-RUNNING Chrome by enabling remote debugging.
-  // On macOS, we can relaunch Chrome with the debug flag — it will reuse the existing instance.
-  try {
-    execSync(
-      `open -a "Google Chrome" --args --remote-debugging-port=9222`,
-      { stdio: "ignore", timeout: 5000 }
-    );
-    // Give Chrome a moment to enable the debug port
-    await new Promise(r => setTimeout(r, 2000));
-    browser = await puppeteer.connect({
-      browserURL: "http://127.0.0.1:9222",
-      defaultViewport: null,
-    });
-    process.stderr.write("[browser-agent] connected to user's Chrome via remote debugging\n");
-    return browser;
-  } catch (e) {
-    process.stderr.write(`[browser-agent] could not connect to user's Chrome: ${e}\n`);
-  }
-
-  // Final fallback: launch a fresh Chrome (won't have user's logins)
-  process.stderr.write(`[browser-agent] launching fresh Chrome: ${chromePath}\n`);
+  process.stderr.write(`[browser-agent] launching Chrome: ${chromePath}\n`);
 
   browser = await puppeteer.launch({
     executablePath: chromePath,
@@ -167,8 +175,116 @@ async function extractStructure(page: Page): Promise<string> {
   });
 }
 
+// AppleScript-based Chrome control — works with the user's already-running Chrome
+async function handleAppleScriptCommand(cmd: { id: string; action: string; [k: string]: unknown }) {
+  switch (cmd.action) {
+    case "open": {
+      const url = cmd.url as string || "about:blank";
+      osascript(`tell application "Google Chrome" to make new tab at end of tabs of front window with properties {URL:"${url}"}`);
+      await new Promise(r => setTimeout(r, 2000));
+      const title = osascript(`tell application "Google Chrome" to title of active tab of front window`);
+      reply(cmd.id, true, { tabId: 1, title, url, message: `Opened: ${title}` });
+      break;
+    }
+    case "goto": {
+      const url = cmd.url as string;
+      osascript(`tell application "Google Chrome" to set URL of active tab of front window to "${url}"`);
+      await new Promise(r => setTimeout(r, 2000));
+      const title = osascript(`tell application "Google Chrome" to title of active tab of front window`);
+      reply(cmd.id, true, { title, url, message: `Navigated to: ${title}` });
+      break;
+    }
+    case "read_page": {
+      const js = `document.body.innerText.substring(0, 15000)`;
+      const text = osascript(`tell application "Google Chrome" to execute active tab of front window javascript "${js}"`);
+      const title = osascript(`tell application "Google Chrome" to title of active tab of front window`);
+      const url = osascript(`tell application "Google Chrome" to URL of active tab of front window`);
+      reply(cmd.id, true, { title, url, text, length: text.length });
+      break;
+    }
+    case "read_structure": {
+      const js = `(function(){var items=[];document.querySelectorAll('a[href],button,[role=button]').forEach(function(el,i){if(i>30)return;var t=el.innerText.trim().substring(0,60);var h=el.href||'';if(t||h)items.push('['+i+'] <'+el.tagName.toLowerCase()+'> '+JSON.stringify(t)+(h?' -> '+h:''))});return items.join('\\n')})()`;
+      const structure = osascript(`tell application "Google Chrome" to execute active tab of front window javascript "${js}"`);
+      const title = osascript(`tell application "Google Chrome" to title of active tab of front window`);
+      reply(cmd.id, true, { title, structure });
+      break;
+    }
+    case "click": {
+      const text = cmd.text as string || "";
+      const selector = cmd.selector as string || "";
+      let js: string;
+      if (text) {
+        js = `(function(){var els=document.querySelectorAll('a,button,[role=button],span,div');for(var i=0;i<els.length;i++){if(els[i].innerText.includes('${text.replace(/'/g, "\\'")}')){els[i].click();return 'clicked'}}return 'not found'})()`;
+      } else {
+        js = `(function(){var el=document.querySelector('${selector.replace(/'/g, "\\'")}');if(el){el.click();return 'clicked'}return 'not found'})()`;
+      }
+      const result = osascript(`tell application "Google Chrome" to execute active tab of front window javascript "${js}"`);
+      await new Promise(r => setTimeout(r, 1500));
+      const title = osascript(`tell application "Google Chrome" to title of active tab of front window`);
+      reply(cmd.id, true, { title, message: `Click result: ${result}. Now on: ${title}` });
+      break;
+    }
+    case "type": {
+      const text = cmd.text as string;
+      const selector = cmd.selector as string || "input:focus,textarea:focus";
+      const js = `(function(){var el=document.querySelector('${selector.replace(/'/g, "\\'")}');if(el){el.value='${text.replace(/'/g, "\\'")}';el.dispatchEvent(new Event('input',{bubbles:true}));return 'typed'}return 'not found'})()`;
+      osascript(`tell application "Google Chrome" to execute active tab of front window javascript "${js}"`);
+      reply(cmd.id, true, { message: `Typed into ${selector}` });
+      break;
+    }
+    case "scroll": {
+      const dir = (cmd.direction as string) || "down";
+      const px = (cmd.pixels as number) || 600;
+      const js = `window.scrollBy(0,${dir === "up" ? -px : px})`;
+      osascript(`tell application "Google Chrome" to execute active tab of front window javascript "${js}"`);
+      reply(cmd.id, true, { message: `Scrolled ${dir} ${px}px` });
+      break;
+    }
+    case "wait": {
+      await new Promise(r => setTimeout(r, Math.min((cmd.ms as number) || 2000, 10000)));
+      reply(cmd.id, true, { message: `Waited ${cmd.ms ?? 2000}ms` });
+      break;
+    }
+    case "list_tabs": {
+      const titles = osascript(`tell application "Google Chrome" to title of tabs of front window`).split(", ");
+      const urls = osascript(`tell application "Google Chrome" to URL of tabs of front window`).split(", ");
+      const tabs = titles.map((t: string, i: number) => ({ id: i + 1, title: t, url: urls[i] || "" }));
+      reply(cmd.id, true, { tabs });
+      break;
+    }
+    case "switch_tab": {
+      const idx = (cmd.tabId as number) || 1;
+      osascript(`tell application "Google Chrome" to set active tab index of front window to ${idx}`);
+      await new Promise(r => setTimeout(r, 500));
+      const title = osascript(`tell application "Google Chrome" to title of active tab of front window`);
+      reply(cmd.id, true, { title, message: `Switched to tab ${idx}: ${title}` });
+      break;
+    }
+    case "screenshot": {
+      // Can't get screenshot via AppleScript — tell Samuel to use observe_screen instead
+      reply(cmd.id, true, { message: "Use observe_screen tool to see the browser. AppleScript mode doesn't support screenshots directly." });
+      break;
+    }
+    case "press": {
+      const key = cmd.key as string;
+      const js = `document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'${key}',bubbles:true}))`;
+      osascript(`tell application "Google Chrome" to execute active tab of front window javascript "${js}"`);
+      reply(cmd.id, true, { message: `Pressed ${key}` });
+      break;
+    }
+    default:
+      reply(cmd.id, true, { message: `Action '${cmd.action}' not supported in AppleScript mode` });
+  }
+}
+
 async function handleCommand(cmd: { id: string; action: string; [k: string]: unknown }) {
   try {
+    // Route through AppleScript if Chrome is already running (preserves user's logins)
+    if (useAppleScript) {
+      await handleAppleScriptCommand(cmd);
+      return;
+    }
+
     switch (cmd.action) {
       case "open": {
         const { tabId, page } = await newTab(cmd.url as string | undefined);
