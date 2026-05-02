@@ -143,6 +143,9 @@ export function useRealtime(): UseRealtimeReturn {
 
   // Rate-limit auto-screen injections to prevent flooding the session with images.
   const lastAutoScreenRef = useRef(0);
+  // Track the last auto-screen item ID so we can delete stale screenshots.
+  // Only ONE screenshot should exist in context at a time (prevents "this" confusion).
+  const lastScreenItemIdRef = useRef<string | null>(null);
 
   // True while a response is being generated (audio may still be playing).
   // Mic stays muted until this goes false + delay, preventing mid-sentence cutoff.
@@ -300,30 +303,42 @@ export function useRealtime(): UseRealtimeReturn {
 
         case "input_audio_buffer.speech_stopped":
           setAgentState("thinking");
-          // Auto-inject a fresh screenshot — rate-limited and gated:
-          // 1. Skip until greeting has completed (agentResponseCount >= 1)
-          // 2. Respect 5s cooldown between injections
+          // Always inject a FRESH screenshot so the model sees the current screen.
+          // This ensures "this/that" always refers to what's visible NOW, not stale context.
+          // Delete the previous screenshot to keep exactly one in context.
           {
             const now = Date.now();
             const elapsed = now - lastAutoScreenRef.current;
             const pastGreeting = agentResponseCountRef.current >= 1;
             if (pastGreeting && elapsed >= AUTO_SCREEN_COOLDOWN_MS) {
               lastAutoScreenRef.current = now;
-              invoke<{ base64: string; app_name: string; display_context?: string } | null>("capture_if_changed")
+              invoke<{ base64: string; app_name: string; display_context?: string }>("capture_screen_now")
                 .then((result) => {
                   if (result && sessionRef.current) {
+                    // Delete previous screenshot to prevent stale "this" confusion
+                    if (lastScreenItemIdRef.current) {
+                      try {
+                        sessionRef.current.transport.sendEvent({
+                          type: "conversation.item.delete",
+                          item_id: lastScreenItemIdRef.current,
+                        });
+                      } catch { /* old item may already be gone */ }
+                    }
+
+                    const itemId = `screen_${now}`;
                     const content: Array<Record<string, string>> = [
                       { type: "input_image", image_url: `data:image/jpeg;base64,${result.base64}` },
                     ];
                     if (result.display_context) {
-                      content.push({ type: "input_text", text: `[Screen layout: ${result.display_context}]` });
+                      content.push({ type: "input_text", text: `[Current screen: ${result.display_context}]` });
                     }
                     try {
                       sessionRef.current.transport.sendEvent({
                         type: "conversation.item.create",
-                        item: { type: "message", role: "user", content },
+                        item: { id: itemId, type: "message", role: "user", content },
                       });
-                      console.log(`[auto-screen] injected (${result.app_name})${result.display_context ? ` [${result.display_context}]` : ""}`);
+                      lastScreenItemIdRef.current = itemId;
+                      console.log(`[auto-screen] fresh screenshot injected (${result.app_name})`);
                     } catch {
                       console.warn("[auto-screen] send failed — connection may be dead");
                     }

@@ -239,8 +239,6 @@ pub async fn set_system_volume(volume: u32) -> Result<(), String> {
 }
 
 /// Capture a full-display screenshot only if the screen has changed since the last capture.
-/// Always captures the entire display (all visible apps) rather than a single app window,
-/// so the model sees exactly what the user sees.
 #[tauri::command]
 pub async fn capture_if_changed() -> Result<Option<CaptureResult>, String> {
     let capture = capture_full_display()?;
@@ -251,8 +249,14 @@ pub async fn capture_if_changed() -> Result<Option<CaptureResult>, String> {
         return Ok(None);
     }
     *prev_hash = current_hash;
-    eprintln!("[auto-screen] screen changed, injecting (display {})", capture.app_name);
     Ok(Some(capture))
+}
+
+/// Always capture a fresh full-display screenshot (no hash/dedup check).
+/// Used for auto-screen injection where we always want the latest state.
+#[tauri::command]
+pub async fn capture_screen_now() -> Result<CaptureResult, String> {
+    capture_full_display()
 }
 
 /// Get a text summary of which apps are visible on which displays.

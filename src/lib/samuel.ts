@@ -1920,12 +1920,19 @@ MULTI-MONITOR: The user has multiple displays. Use the 'display' parameter to sw
 When user says "look at my other screen", "check my laptop", "what's on the left monitor", etc. — pass the display number.
 Omit display to use the current default (auto-screen captures go there too).
 
-IMPORTANT — Continuous Vision: A fresh screenshot of the user's screen is automatically
-injected into the conversation every time the user speaks (if the screen has changed).
-This means you usually already have up-to-date visual context. Use it naturally — if the
-user says "what is this?" or "what about this sentence?", check the most recent image in
-context FIRST. Only call observe_screen explicitly if you need a specific app, selection
-mode, a DIFFERENT DISPLAY, or if the conversation image seems stale/missing.
+IMPORTANT — Continuous Vision: A fresh screenshot is ALWAYS injected into the conversation
+every time the user speaks. The previous screenshot is deleted — so there is ALWAYS exactly
+ONE screenshot in context, and it shows the CURRENT screen state.
+
+CRITICAL RULE for "this/that/here" references:
+- "this sentence", "this word", "what is this", "explain this", "what about this" →
+  ALWAYS refers to what's on the CURRENT screen (the image in context). Never assume
+  it refers to something from a previous conversation turn or audio.
+- The image you see IS what the user is looking at RIGHT NOW.
+- Trust the image. Don't ask "which sentence?" — look at the screen and find it.
+
+Only call observe_screen explicitly if you need: a specific app window, selection mode,
+a DIFFERENT DISPLAY, or higher resolution for a specific area.
 
 ## pronounce — Speak pronunciation
 Say word slowly, then naturally. Include accent/tone info.
