@@ -330,28 +330,46 @@ fn capture_full_display() -> Result<CaptureResult, String> {
         return Err("Captured image too small".to_string());
     }
 
-    // 1280px wide at quality 45 keeps the JPEG under ~150KB (base64 ~200KB)
-    // which the Realtime API can process without stalling
-    let sips_result = Command::new("/usr/bin/sips")
-        .args([
-            "--resampleWidth", "1280",
-            "--setProperty", "format", "jpeg",
-            "--setProperty", "formatOptions", "45",
-            tmp_png,
-            "--out", tmp_jpg,
-        ])
-        .output();
+    // Large images over WebRTC silently kill the connection (confirmed OpenAI bug).
+    // Target: <120KB JPEG. Start at 1024px/quality 35, re-encode lower if needed.
+    let mut quality = 35;
+    let mut width = 1024;
+
+    loop {
+        let w_str = width.to_string();
+        let q_str = quality.to_string();
+        let sips_result = Command::new("/usr/bin/sips")
+            .args([
+                "--resampleWidth", &w_str,
+                "--setProperty", "format", "jpeg",
+                "--setProperty", "formatOptions", &q_str,
+                tmp_png,
+                "--out", tmp_jpg,
+            ])
+            .output();
+
+        match sips_result {
+            Ok(output) if output.status.success() => {}
+            _ => {
+                let _ = fs::remove_file(tmp_png);
+                return Err("Failed to resize screenshot".to_string());
+            }
+        }
+
+        let size = fs::metadata(tmp_jpg).map(|m| m.len()).unwrap_or(0);
+        if size <= 120_000 || quality <= 15 {
+            break;
+        }
+        // Still too large — reduce quality further
+        quality -= 10;
+        eprintln!("[capture] JPEG too large ({size}B), retrying at quality {quality}");
+    }
 
     let _ = fs::remove_file(tmp_png);
 
-    let final_path = match sips_result {
-        Ok(output) if output.status.success() => tmp_jpg,
-        _ => return Err("Failed to resize screenshot".to_string()),
-    };
-
-    let jpg_data = fs::read(final_path).map_err(|e| format!("Read JPEG: {e}"))?;
-    eprintln!("[capture] full-display JPEG: {} bytes", jpg_data.len());
-    let _ = fs::remove_file(final_path);
+    let jpg_data = fs::read(tmp_jpg).map_err(|e| format!("Read JPEG: {e}"))?;
+    eprintln!("[capture] full-display JPEG: {} bytes (q={quality}, w={width})", jpg_data.len());
+    let _ = fs::remove_file(tmp_jpg);
 
     let layout = get_display_layout_summary();
 

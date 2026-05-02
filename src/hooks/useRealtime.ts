@@ -318,11 +318,15 @@ export function useRealtime(): UseRealtimeReturn {
                     if (result.display_context) {
                       content.push({ type: "input_text", text: `[Screen layout: ${result.display_context}]` });
                     }
-                    sessionRef.current.transport.sendEvent({
-                      type: "conversation.item.create",
-                      item: { type: "message", role: "user", content },
-                    });
-                    console.log(`[auto-screen] injected (${result.app_name})${result.display_context ? ` [${result.display_context}]` : ""}`);
+                    try {
+                      sessionRef.current.transport.sendEvent({
+                        type: "conversation.item.create",
+                        item: { type: "message", role: "user", content },
+                      });
+                      console.log(`[auto-screen] injected (${result.app_name})${result.display_context ? ` [${result.display_context}]` : ""}`);
+                    } catch {
+                      console.warn("[auto-screen] send failed — connection may be dead");
+                    }
                   }
                 })
                 .catch(() => {});
@@ -785,13 +789,18 @@ export function useRealtime(): UseRealtimeReturn {
         }
       }).catch(() => {});
 
-      // Start heartbeat — keeps the Realtime API connection alive during silence
+      // Start heartbeat — keeps the Realtime API connection alive during silence.
+      // Also detects dead connections: if send throws, trigger auto-reconnect.
       heartbeatRef.current = setInterval(() => {
         if (sessionRef.current) {
           try {
             sessionRef.current.transport.sendEvent({ type: "session.update", session: {} });
           } catch {
-            console.warn("[heartbeat] failed to send ping");
+            console.warn("[heartbeat] send failed — connection dead, reconnecting");
+            stopKeepalive();
+            setStatus("disconnected");
+            setAgentState("idle");
+            setTimeout(() => { connectRef.current?.(); }, 1500);
           }
         }
       }, HEARTBEAT_INTERVAL_MS);
