@@ -20,6 +20,38 @@ use secrets::*;
 use wake_word::*;
 use tauri::Manager;
 
+#[cfg(target_os = "macos")]
+fn request_accessibility_permission() {
+    use std::process::Command;
+    // Use osascript to check + prompt. If not trusted, the Swift helper's
+    // AXIsProcessTrustedWithOptions call will trigger the system dialog.
+    // We also run a quick AX probe that triggers the macOS permission prompt.
+    let result = Command::new("/usr/bin/osascript")
+        .args(["-e", r#"tell application "System Events" to name of first application process whose frontmost is true"#])
+        .output();
+    match result {
+        Ok(output) if output.status.success() => {
+            eprintln!("[accessibility] permission granted ✓");
+        }
+        _ => {
+            eprintln!("[accessibility] permission may not be granted — check System Settings → Privacy → Accessibility");
+            // Open System Settings directly to the Accessibility pane
+            let _ = Command::new("/usr/bin/open")
+                .args(["x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"])
+                .spawn();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn check_accessibility_permission() -> bool {
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .args(["-e", r#"tell application "System Events" to name of first application process whose frontmost is true"#])
+        .output();
+    matches!(output, Ok(o) if o.status.success())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -48,6 +80,10 @@ pub fn run() {
                     ns_win.setOpaque_(cocoa::base::NO);
                     ns_win.setHasShadow_(cocoa::base::NO);
                 }
+
+                // Request Accessibility permission (shows system dialog if not granted).
+                // Required for read_app (AX tree) to read content from other apps.
+                request_accessibility_permission();
             }
 
             Ok(())
@@ -60,6 +96,7 @@ pub fn run() {
             open_app,
             read_app_content,
             list_app_windows,
+            check_accessibility_permission,
             set_system_volume,
             get_config,
             transcribe_audio,

@@ -298,6 +298,12 @@ const readAppTool = tool({
   }),
   async execute({ app, list_windows }) {
     try {
+      // Check accessibility permission first
+      const hasPermission = await invoke<boolean>("check_accessibility_permission").catch(() => true);
+      if (!hasPermission) {
+        return toolErr("permission", "Accessibility permission not granted. Please add Samuel to System Settings → Privacy & Security → Accessibility, then restart.");
+      }
+
       if (list_windows) {
         const windows = await invoke<string>("list_app_windows");
         return toolOk(`Open windows:\n${windows}`);
