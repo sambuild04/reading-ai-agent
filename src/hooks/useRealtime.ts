@@ -548,19 +548,27 @@ export function useRealtime(): UseRealtimeReturn {
       session.transport.sendEvent({ type: "response.create" });
     });
 
-    // Plugin reload: loads all dynamic plugins and updates the live agent
+    // Plugin reload: loads all dynamic plugins and updates the live agent.
+    // Also re-injects memory so it's not lost when tools are updated.
     const doReloadPlugins = async () => {
       try {
-        const pluginTools = await loadAllPlugins();
+        const [pluginTools, memoryCtx] = await Promise.all([
+          loadAllPlugins(),
+          invoke<string>("memory_get_context").catch(() => ""),
+        ]);
         const coreTools = samuelAgent.tools as FunctionTool[];
         const merged = mergeTools(coreTools, pluginTools);
+        let instructions = samuelAgent.instructions as string;
+        if (memoryCtx && memoryCtx !== "No prior context.") {
+          instructions += `\n\n# Persistent Memory (from previous sessions)\n${memoryCtx}\nFollow these memories strictly. Do not repeat vocabulary marked as known.`;
+        }
         const updatedAgent = new RealtimeAgent({
           name: samuelAgent.name,
-          instructions: samuelAgent.instructions as string,
+          instructions,
           tools: merged,
         });
         await session.updateAgent(updatedAgent);
-        console.log(`[plugins] agent updated: ${merged.length} tools (${pluginTools.length} from plugins)`);
+        console.log(`[plugins] agent updated: ${merged.length} tools (${pluginTools.length} from plugins), memory=${memoryCtx.length > 0 ? "yes" : "no"}`);
       } catch (err) {
         console.error("[plugins] reload failed:", err);
       }
@@ -776,33 +784,42 @@ export function useRealtime(): UseRealtimeReturn {
         session.transport.sendEvent({ type: "response.create" });
       }
 
-      // Load dynamic plugins and merge with core tools
+      // Load plugins + inject persistent memory in one atomic updateAgent call.
+      // This avoids race conditions where two separate updateAgent calls overwrite each other.
       const session_ = sessionRef.current;
       if (session_) {
-        loadAllPlugins().then((pluginTools) => {
-          if (pluginTools.length > 0) {
-            const coreTools = samuelAgent.tools as FunctionTool[];
-            const merged = mergeTools(coreTools, pluginTools);
-            const updatedAgent = new RealtimeAgent({
-              name: samuelAgent.name,
-              instructions: samuelAgent.instructions as string,
-              tools: merged,
-            });
-            session_.updateAgent(updatedAgent).then(() => {
-              console.log(`[plugins] loaded ${pluginTools.length} plugin(s), ${merged.length} total tools`);
-            }).catch((err) => console.error("[plugins] updateAgent failed:", err));
-          }
-        }).catch((err) => console.error("[plugins] load on connect failed:", err));
-      }
+        Promise.all([
+          loadAllPlugins().catch((err) => { console.error("[plugins] load failed:", err); return [] as FunctionTool[]; }),
+          invoke<string>("memory_get_context").catch(() => ""),
+        ]).then(([pluginTools, memoryCtx]) => {
+          const coreTools = samuelAgent.tools as FunctionTool[];
+          const tools = pluginTools.length > 0 ? mergeTools(coreTools, pluginTools) : coreTools;
+          let instructions = samuelAgent.instructions as string;
 
-      // Auto-detect learning language from stored memory and silently activate
-      invoke<string>("memory_get_context").then((ctx) => {
-        const match = ctx.match(/proficiency:(\w+)/i);
-        if (match) {
-          console.log(`[session] auto-detected learning language: ${match[1]}`);
-          notifyLearningLanguage(match[1]);
-        }
-      }).catch(() => {});
+          // Inject persistent memory so Samuel remembers across sessions
+          if (memoryCtx && memoryCtx !== "No prior context.") {
+            instructions += `\n\n# Persistent Memory (from previous sessions)\n${memoryCtx}\nFollow these memories strictly. Do not repeat vocabulary marked as known.`;
+            console.log(`[memory] injecting ${memoryCtx.length} chars of persistent context`);
+          }
+
+          // Auto-detect learning language from memory
+          const langMatch = memoryCtx.match(/proficiency:(\w+)/i);
+          if (langMatch) {
+            console.log(`[session] auto-detected learning language: ${langMatch[1]}`);
+            notifyLearningLanguage(langMatch[1]);
+          }
+
+          // Single updateAgent call with both plugins and memory
+          const updatedAgent = new RealtimeAgent({
+            name: samuelAgent.name,
+            instructions,
+            tools,
+          });
+          session_.updateAgent(updatedAgent).then(() => {
+            console.log(`[session] agent updated: ${pluginTools.length} plugin(s), memory=${memoryCtx.length > 0 ? "yes" : "no"}`);
+          }).catch((err) => console.error("[session] updateAgent failed:", err));
+        });
+      }
 
       // Start heartbeat — keeps the Realtime API connection alive during silence.
       // Also detects dead connections: if send throws, trigger auto-reconnect.

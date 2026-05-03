@@ -573,7 +573,13 @@ pub async fn memory_clear() -> Result<(), String> {
 
 #[tauri::command]
 pub async fn memory_get_context() -> Result<String, String> {
-    Ok(get_context())
+    let mut ctx = get_context();
+    // Append active watches so the agent knows what it's monitoring
+    if let Some(watches) = get_watches_context() {
+        ctx.push_str("\n\nActive watches (you are monitoring these):\n");
+        ctx.push_str(&watches);
+    }
+    Ok(ctx)
 }
 
 #[tauri::command]
