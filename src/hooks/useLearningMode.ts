@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../lib/invoke-bridge";
 import { registerLearningLanguage, sendTextAndRespond, sendSilentContext, sendAudioClip } from "../lib/session-bridge";
 import type { ConnectionStatus } from "./useRealtime";
 import type { VocabCardMode } from "../hooks/useUIPreferences";
@@ -192,7 +192,11 @@ export function useLearningMode(
         // Classifier triggers: GPT-4o-mini, evaluated in Rust.
         // Matches fire via sendTextAndRespond (synthetic turn injection).
 
-        const audioText = audioResult.transcript || "";
+        // Only send audio to watch triggers if the Rust side confirmed it's
+        // target-language content (hint !== null). When Whisper detects a
+        // non-target language, hint is null and we skip watch evaluation to
+        // prevent false positives from English audio being classified as Japanese.
+        const audioText = (audioResult.transcript && audioResult.hint) ? audioResult.transcript : "";
         const screenText = screenHint && !screenHint.startsWith("NONE") ? screenHint : "";
         const hasContent = audioText || screenText;
 

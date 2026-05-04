@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../lib/invoke-bridge";
 import { sendTextAndRespond } from "../lib/session-bridge";
 import type { ConnectionStatus } from "./useRealtime";
 

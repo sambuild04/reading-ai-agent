@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Read Apple Books pages via Peekaboo + vision OCR",
   "type": "module",
+  "main": "dist-electron/main.js",
   "bin": {
     "books-reader": "./dist/index.js",
     "reader": "./dist/index.js"
@@ -10,9 +11,9 @@
   "scripts": {
     "ui:dev": "vite",
     "ui:build": "vite build --outDir dist-ui",
-    "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
+    "electron:compile": "tsc -p electron/tsconfig.json && cp electron/package.json dist-electron/package.json",
+    "electron:dev": "npm run electron:compile && concurrently \"vite\" \"unset ELECTRON_RUN_AS_NODE && NODE_ENV=development electron dist-electron/main.js\"",
+    "electron:build": "npm run ui:build && npm run electron:compile && electron-builder",
     "cli:build": "tsc -p tsconfig.cli.json",
     "cli:start": "node dist/index.js",
     "cli:dev": "tsx src-cli/index.ts",
@@ -21,10 +22,8 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.0.1",
-    "@openai/agents": "^0.5.4",
+    "@openai/agents": "^0.8.5",
     "@rive-app/react-canvas": "^4.27.1",
-    "@tauri-apps/api": "^2.10.1",
-    "@tauri-apps/plugin-shell": "^2.3.5",
     "chrome-devtools-mcp": "^0.23.0",
     "commander": "^12.1.0",
     "picocolors": "^1.1.1",
@@ -37,16 +36,42 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.1",
-    "@tauri-apps/cli": "^2.10.0",
     "@types/node": "^22.10.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^5.1.4",
+    "electron": "^35.1.2",
+    "concurrently": "^9.1.2",
+    "electron-builder": "^26.0.12",
     "tailwindcss": "^4.2.1",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vite": "^7.3.1"
+  },
+  "build": {
+    "appId": "com.samuel.assistant",
+    "productName": "Samuel",
+    "directories": {
+      "output": "dist-app"
+    },
+    "files": [
+      "dist-electron/**/*",
+      "dist-ui/**/*",
+      "helpers/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "helpers",
+        "to": "helpers",
+        "filter": ["**/*"]
+      }
+    ],
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.productivity",
+      "darkModeSupport": true
+    }
   },
   "engines": {
     "node": ">=20"

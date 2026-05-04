@@ -2,6 +2,7 @@ import { useEffect, type ReactNode } from "react";
 import { useRive, useStateMachineInput } from "@rive-app/react-canvas";
 import type { TranscriptEntry } from "../hooks/useRealtime";
 import type { AnalysisStage, RecordingAnalysis, RecordingState } from "../hooks/useRecordMode";
+import { ToolApprovalCard } from "./ToolApprovalCard";
 
 type AgentState = "idle" | "listening" | "thinking" | "speaking";
 
@@ -20,7 +21,12 @@ interface CharacterProps {
   onTogglePanel: () => void;
   onClearAnalysis: () => void;
   onMailboxToggle: () => void;
+  onWakeUp?: () => void;
   envelopeSlot?: ReactNode;
+  onApproveToolCall?: (entryId: string) => void;
+  onDenyToolCall?: (entryId: string) => void;
+  onAlwaysAllowApp?: (entryId: string, appName: string) => void;
+  onAlwaysDenyApp?: (entryId: string, appName: string) => void;
 }
 
 const STATE_MACHINE = "State Machine 1";
@@ -46,7 +52,12 @@ export function Character({
   onTogglePanel,
   onClearAnalysis,
   onMailboxToggle,
+  onWakeUp,
   envelopeSlot,
+  onApproveToolCall,
+  onDenyToolCall,
+  onAlwaysAllowApp,
+  onAlwaysDenyApp,
 }: CharacterProps) {
   const { rive, RiveComponent } = useRive({
     src: "/character.riv",
@@ -80,7 +91,7 @@ export function Character({
   const showListening = agentState === "listening" && !awaitingWake;
 
   return (
-    <div className="character-stage" data-tauri-drag-region>
+    <div className="character-stage drag-region">
       {/* Recording indicator */}
       {recordingState === "recording" && (
         <div className="recording-badge">
@@ -158,6 +169,22 @@ export function Character({
         </div>
       )}
 
+      {/* Tool approval cards — floating above user speech area */}
+      {transcript
+        .filter((e) => e.role === "approval" && e.approval?.state === "pending")
+        .slice(-2)
+        .map((entry) => (
+          <div key={entry.id} className="tool-approval-float">
+            <ToolApprovalCard
+              entry={entry}
+              onApprove={onApproveToolCall ?? (() => {})}
+              onDeny={onDenyToolCall ?? (() => {})}
+              onAlwaysAllow={onAlwaysAllowApp}
+              onAlwaysDeny={onAlwaysDenyApp}
+            />
+          </div>
+        ))}
+
       {/* User's speech bubble — bottom left of character */}
       {latestUser && (
         <div className="speech-bubble speech-bubble-user">
@@ -166,11 +193,11 @@ export function Character({
         </div>
       )}
 
-      {/* State indicator */}
+      {/* State indicator — tap to wake manually */}
       {awaitingWake && (
-        <div className="character-hint">
-          Say &quot;Hey Samuel&quot;
-        </div>
+        <button className="character-hint wake-button" onClick={onWakeUp}>
+          <MicIcon /> Tap or say &quot;Hey Samuel&quot;
+        </button>
       )}
       {showListening && (
         <div className="character-listening">
@@ -306,6 +333,16 @@ function ChatSvg() {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
       <path d="M8 10h.01" /><path d="M12 10h.01" /><path d="M16 10h.01" />
+    </svg>
+  );
+}
+
+function MicIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="2" width="6" height="11" rx="3" />
+      <path d="M5 10a7 7 0 0 0 14 0" />
+      <line x1="12" y1="19" x2="12" y2="22" />
     </svg>
   );
 }

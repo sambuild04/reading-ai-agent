@@ -1,10 +1,52 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, debugLog } from "../lib/invoke-bridge";
 import { RealtimeAgent, RealtimeSession, OpenAIRealtimeWebRTC } from "@openai/agents/realtime";
+import type { FunctionTool, RealtimeOutputGuardrail, RealtimeItem } from "@openai/agents/realtime";
 import { samuelAgent } from "../lib/samuel";
 import { registerSendImage, registerSendText, registerScreenTarget, registerSendSilentContext, registerSendTextAndRespond, registerSendAudioClip, registerReloadPlugins, notifyLearningLanguage, registerSetVolume } from "../lib/session-bridge";
 import { loadAllPlugins } from "../lib/plugin-loader";
-import type { FunctionTool } from "@openai/agents/realtime";
+
+// ---------------------------------------------------------------------------
+// Output Guardrails — monitor Samuel's speech in real-time and cut off if needed.
+// Each guardrail runs periodically as transcript text accumulates.
+// If tripwireTriggered=true, Samuel's audio is cancelled and the policyHint
+// is fed back to the model so it self-corrects.
+// ---------------------------------------------------------------------------
+
+const outputGuardrails: RealtimeOutputGuardrail[] = [
+  {
+    name: "no_unprompted_teaching",
+    policyHint:
+      "Do not teach or explain language vocabulary unless the user explicitly asked for it " +
+      "or there is confirmed audio/screen content in the target language. Stay silent about language unless prompted.",
+    async execute({ agentOutput }) {
+      const text = typeof agentOutput === "string" ? agentOutput : String(agentOutput);
+      const teachingPatterns = [
+        /\bin japanese\b.*\bmeans?\b/i,
+        /\bthe word\b.*\b(means?|is)\b/i,
+        /\bvocabulary\b.*\bword\b/i,
+        /\bI (heard|noticed|detected|saw)\b.*\b(japanese|chinese|korean)\b/i,
+        /\bN[1-5] level\b/i,
+      ];
+      const hasTeaching = teachingPatterns.some((p) => p.test(text));
+      const isUnprompted = hasTeaching && text.length < 300 && !text.includes("[System:");
+      return { tripwireTriggered: isUnprompted, outputInfo: { hasTeaching, length: text.length } };
+    },
+  },
+  {
+    name: "no_self_conversation",
+    policyHint:
+      "Stop talking to yourself. Only speak when responding to the user or delivering a tool result. " +
+      "Do not narrate, monologue, or repeat yourself.",
+    async execute({ agentOutput }) {
+      const text = typeof agentOutput === "string" ? agentOutput : String(agentOutput);
+      const sentences = text.split(/[.!?]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+      const unique = new Set(sentences);
+      const isRepetitive = sentences.length > 3 && unique.size <= Math.ceil(sentences.length / 3);
+      return { tripwireTriggered: isRepetitive, outputInfo: { sentences: sentences.length, unique: unique.size } };
+    },
+  },
+];
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 
@@ -17,9 +59,15 @@ function mergeTools(coreTools: FunctionTool[], pluginTools: FunctionTool[]): Fun
 
 export interface TranscriptEntry {
   id: string;
-  role: "user" | "assistant" | "status";
+  role: "user" | "assistant" | "status" | "approval";
   text: string;
   timestamp: number;
+  /** Present only for role === "approval" */
+  approval?: {
+    toolName: string;
+    args?: Record<string, unknown>;
+    state: "pending" | "approved" | "denied";
+  };
 }
 
 // Session keepalive & rotation constants
@@ -27,6 +75,40 @@ const HEARTBEAT_INTERVAL_MS = 30_000; // ping every 30s to prevent server-side i
 const SESSION_ROTATION_MS = 25 * 60 * 1000; // reconnect every 25 min (before 60-min hard cap)
 const CONTEXT_WINDOW_TURNS = 6; // carry this many turns across reconnections
 const AUTO_SCREEN_COOLDOWN_MS = 5_000; // min 5s between auto-screen injections to prevent token flood
+// If transcript hasn't arrived this long after speech_stopped, fall back to capturing
+// context anyway — transcription is occasionally slow or fails.
+const TRANSCRIPT_WAIT_MS = 2_500;
+// Short utterances like "yes", "sounds good", "thanks" don't need a fresh screen
+// capture — the prior turn's context is still in the conversation. Skipping the
+// AX read + screenshot saves ~1-2s, ~150 KB of tokens, and a screenshot upload.
+const ACK_PHRASES = new Set([
+  "ok", "okay", "yes", "yeah", "yep", "yup", "no", "nope", "sure",
+  "thanks", "thank you", "thx", "ty", "got it", "sounds good", "good",
+  "great", "cool", "nice", "alright", "right", "correct", "exactly",
+  "perfect", "awesome", "fine", "done", "stop", "wait",
+  "go on", "continue", "please continue", "keep going", "next",
+  "really", "interesting", "wow", "huh", "hmm", "ah", "oh",
+  "i see", "makes sense", "noted", "understood", "agreed",
+  "let me think", "hold on", "one second", "one moment",
+]);
+
+function isConversationalAck(text: string): boolean {
+  if (!text) return false;
+  const normalized = text.toLowerCase().replace(/[.!?,'"…]/g, "").trim();
+  if (!normalized) return false;
+  // Direct match
+  if (ACK_PHRASES.has(normalized)) return true;
+  // Very short utterance under 20 chars with no question mark / no app/screen
+  // related keywords — almost certainly an ack.
+  if (
+    text.length <= 20 &&
+    !text.includes("?") &&
+    !/\b(read|show|tell|what|who|where|when|why|how|check|look|see|find|open|click|type|gmail|email|tab|chrome|safari|browser|screen|youtube|wechat|order|message|page)\b/i.test(text)
+  ) {
+    return true;
+  }
+  return false;
+}
 
 interface ConversationTurn {
   role: "user" | "assistant";
@@ -45,6 +127,18 @@ export interface UseRealtimeReturn {
   setWakeWordMode: (on: boolean) => void;
   setSuppressIdle: (suppress: boolean) => void;
   prefetchKey: () => void;
+  /** Stop Samuel mid-speech (e.g. "stop talking" button) */
+  interrupt: () => void;
+  /** Approve a pending tool call by its transcript entry ID */
+  approveToolCall: (entryId: string) => void;
+  /** Deny a pending tool call by its transcript entry ID */
+  denyToolCall: (entryId: string) => void;
+  /** Approve + remember per-app permission so this app is never asked again */
+  alwaysAllowApp: (entryId: string, appName: string) => void;
+  /** Deny + remember per-app permission so this app is always blocked */
+  alwaysDenyApp: (entryId: string, appName: string) => void;
+  /** Send a typed text message (shows in transcript + triggers model response) */
+  sendText: (text: string) => void;
 }
 
 // Common hallucinations the transcriber produces from speaker echo / room reverb.
@@ -107,6 +201,11 @@ export function useRealtime(): UseRealtimeReturn {
   const screenTargetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const sessionRef = useRef<RealtimeSession | null>(null);
+  const micStreamRef = useRef<Promise<MediaStream | undefined> | null>(null);
+
+  // Pending tool approvals — maps transcript entry ID to the SDK approval item
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const pendingApprovalsRef = useRef<Map<string, any>>(new Map());
 
   // Conversation context buffer — carried across reconnections
   const contextRef = useRef<ConversationTurn[]>([]);
@@ -146,7 +245,21 @@ export function useRealtime(): UseRealtimeReturn {
   // Track the last auto-screen item ID so we can delete stale screenshots.
   // Only ONE screenshot should exist in context at a time (prevents "this" confusion).
   const lastScreenItemIdRef = useRef<string | null>(null);
+  // Hash of the last AX text we injected. We skip re-injection when the
+  // screen hasn't materially changed — the model already has it.
+  const lastAxHashRef = useRef<string>("");
 
+  // Deferred-context state: speech_stopped sets this up but waits for the
+  // transcript before deciding whether to capture+inject screen data.
+  // - pendingTurnRef.current is true between speech_stopped and the decision
+  //   (transcript completed OR fallback timeout).
+  // - pendingTurnTimerRef fires the fallback if transcription is silent.
+  const pendingTurnRef = useRef(false);
+  const pendingTurnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Forward declaration; the actual function is defined inside the session
+  // setup closure (it needs access to sessionRef, etc.). We assign through
+  // this ref so the speech_stopped fallback timer can call it.
+  const decideAndRespondRef = useRef<((transcript: string) => void) | null>(null);
   // True while a response is being generated (audio may still be playing).
   // Mic stays muted until this goes false + delay, preventing mid-sentence cutoff.
   const responseInProgressRef = useRef(false);
@@ -196,13 +309,42 @@ export function useRealtime(): UseRealtimeReturn {
   }
 
   useEffect(() => {
+    // Chromium WebRTC provides hardware-accelerated AEC — no mute workarounds needed.
+    micStreamRef.current = navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    }).catch((e) => {
+      console.warn("[session] mic request failed, will use SDK default:", e);
+      return undefined;
+    });
+
     const transport = new OpenAIRealtimeWebRTC({
       audioElement: audioElementRef.current!,
     });
 
+    // Stable session ID for tracing — persists across reconnections
+    const sessionGroupId = `samuel_${Date.now()}`;
+
     const session = new RealtimeSession(samuelAgent, {
       transport,
       model: "gpt-realtime",
+      // Output guardrails — cut off unsafe/unwanted speech mid-generation
+      outputGuardrails,
+      outputGuardrailSettings: { debounceTextLength: 150 },
+      // Tracing — correlate all events for debugging
+      groupId: sessionGroupId,
+      workflowName: "samuel-voice",
+      traceMetadata: { app: "samuel", version: "1.0" },
+      // Custom tool error formatter — gives the model actionable hints instead of raw errors.
+      toolErrorFormatter: ({ toolName, kind, defaultMessage }) => {
+        if (kind === "approval_rejected") {
+          return `Tool "${toolName}" was not approved by the user. Ask if they want to proceed differently.`;
+        }
+        return `Tool "${toolName}" error: ${defaultMessage}. Try a different approach or tell the user.`;
+      },
       config: {
         audio: {
           input: {
@@ -216,6 +358,10 @@ export function useRealtime(): UseRealtimeReturn {
               threshold: 0.9,
               prefixPaddingMs: 300,
               silenceDurationMs: 1200,
+              // CRITICAL: do NOT auto-respond on speech_stopped.
+              // We manually trigger response.create AFTER injecting AX tree + screenshot,
+              // so the model has full context before generating its reply.
+              create_response: false,
             },
           },
           output: {
@@ -254,19 +400,100 @@ export function useRealtime(): UseRealtimeReturn {
     });
 
     let toolTimeoutId: ReturnType<typeof setTimeout> | null = null;
-    session.on("agent_tool_start", () => {
+    session.on("agent_tool_start", (_ctx, _agent, tool, details) => {
       setAgentState("thinking");
-      // Safety net: if a tool hangs for >30s, recover the UI
+      const toolName = tool?.name ?? (typeof tool === "string" ? tool : "unknown");
+      let argsPreview = "";
+      try {
+        const args = (details as Record<string, unknown>)?.toolCall ?? details;
+        const argsStr = typeof args === "string" ? args : JSON.stringify(args);
+        argsPreview = argsStr.length > 300 ? argsStr.slice(0, 300) + "..." : argsStr;
+      } catch {
+        argsPreview = "(could not stringify args)";
+      }
+      debugLog("tool-call", `START ${toolName} args=${argsPreview}`);
       if (toolTimeoutId) clearTimeout(toolTimeoutId);
       toolTimeoutId = setTimeout(() => {
-        console.warn("[session] tool timeout — recovering from stuck thinking state");
+        debugLog("tool-call", `TIMEOUT ${toolName} — recovering UI from stuck thinking`, "warn");
         setAgentState("listening");
         responseInProgressRef.current = false;
       }, 30_000);
     });
-    session.on("agent_tool_end", () => {
+    session.on("agent_tool_end", (_ctx, _agent, tool, result) => {
       if (toolTimeoutId) { clearTimeout(toolTimeoutId); toolTimeoutId = null; }
       setAgentState("listening");
+      const toolName = tool?.name ?? (typeof tool === "string" ? tool : "unknown");
+      const resultStr = typeof result === "string" ? result : JSON.stringify(result);
+      const preview = resultStr ? (resultStr.length > 400 ? resultStr.slice(0, 400) + "..." : resultStr) : "(empty)";
+      debugLog("tool-call", `END   ${toolName} result=${preview}`);
+    });
+
+    // Guardrail tripped — Samuel said something he shouldn't have.
+    // Use session.interrupt() to immediately stop the audio output.
+    session.on("guardrail_tripped", (_ctx, _agent, error) => {
+      const name = error?.result?.guardrail?.name ?? "unknown";
+      console.warn(`[guardrail] tripped: ${name}`, error.message);
+      // Immediately cut off the unwanted speech
+      try { session.interrupt(); } catch {}
+      setTranscript((prev) => [
+        ...prev,
+        makeEntry("status", `[Guardrail: ${name} — correcting]`),
+      ]);
+    });
+
+    // Tool approval — show an interactive card the user can approve or deny
+    session.on("tool_approval_requested", (_ctx, _agent, request) => {
+      if (request.type === "function_approval") {
+        const toolName = request.tool.name;
+        console.log(`[approval] tool '${toolName}' needs approval`);
+
+        const entryId = String(++entryCounter);
+        pendingApprovalsRef.current.set(entryId, request.approvalItem);
+
+        setTranscript((prev) => [
+          ...prev,
+          {
+            id: entryId,
+            role: "approval" as const,
+            text: `Use tool "${toolName}"`,
+            timestamp: Date.now(),
+            approval: { toolName, state: "pending" },
+          },
+        ]);
+      } else {
+        // MCP / non-function approvals — auto-approve silently
+        session.approve(request.approvalItem).catch(() => {});
+      }
+    });
+
+    // Agent handoff — log when Samuel delegates to a specialist
+    session.on("agent_handoff", (_ctx, fromAgent, toAgent) => {
+      console.log(`[handoff] ${fromAgent.name} → ${toAgent.name}`);
+      setTranscript((prev) => [
+        ...prev,
+        makeEntry("status", `[${toAgent.name} active]`),
+      ]);
+    });
+
+    // History events — keep SDK history as source of truth for debugging
+    session.on("history_updated", (history: RealtimeItem[]) => {
+      console.log(`[history] updated: ${history.length} items`);
+    });
+    session.on("history_added", (item: RealtimeItem) => {
+      // Prune stale screenshots from SDK history when a new one arrives.
+      // This prevents the model from referencing old "this" screenshots.
+      if (item.type === "message" && "role" in item && item.role === "user") {
+        const hasImage = ("content" in item) && Array.isArray(item.content) &&
+          item.content.some((c: Record<string, unknown>) => c.type === "input_image");
+        if (hasImage && lastScreenItemIdRef.current && item.itemId !== lastScreenItemIdRef.current) {
+          // Use updateHistory to remove the stale screenshot
+          const staleId = lastScreenItemIdRef.current;
+          session.updateHistory((h: RealtimeItem[]) =>
+            h.filter((i: RealtimeItem) => i.itemId !== staleId)
+          );
+          console.log(`[history] pruned stale screenshot ${staleId}`);
+        }
+      }
     });
 
     session.on("error", (error: unknown) => {
@@ -285,12 +512,135 @@ export function useRealtime(): UseRealtimeReturn {
     // so the next wake word triggers a fresh reconnect.
     // Handled via transport wildcard events ("session.closed" / "close").
 
+    // ── Smart context-injection decision ──────────────────────────────────
+    // Called ONCE per turn after we know the transcript (or fallback timeout).
+    // Decides whether to refresh AX/screenshot context based on:
+    //   1. Was it a conversational ack? ("sounds good", "ok", "thanks") → skip
+    //   2. Has the screen materially changed since last injection? → skip if not
+    //   3. Are we still in cooldown / pre-greeting? → skip
+    // Always triggers response.create at the end so the model replies.
+    const decideAndRespond = (transcript: string) => {
+      // Cheap djb2 hash — used to detect whether AX content changed materially.
+      const cheapHash = (s: string): string => {
+        let h = 5381;
+        for (let i = 0; i < s.length; i++) {
+          h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+        }
+        return h.toString(36);
+      };
+
+      const triggerResponse = () => {
+        try {
+          sessionRef.current?.transport.sendEvent({ type: "response.create" });
+          debugLog("turn", "response.create triggered");
+        } catch (e) {
+          debugLog("turn", `response.create failed: ${e}`, "warn");
+        }
+      };
+
+      const now = Date.now();
+      const elapsed = now - lastAutoScreenRef.current;
+      const pastGreeting = agentResponseCountRef.current >= 1;
+
+      // Reason 1: conversational ack — model has prior context, just respond
+      if (transcript && isConversationalAck(transcript)) {
+        debugLog("turn", `ack detected ("${transcript}") — skipping context refresh`);
+        triggerResponse();
+        return;
+      }
+
+      // Reason 2: still in pre-greeting or recent cooldown
+      if (!pastGreeting || elapsed < AUTO_SCREEN_COOLDOWN_MS) {
+        debugLog("turn", `skipping context inject (pastGreeting=${pastGreeting}, elapsed=${elapsed}ms)`);
+        triggerResponse();
+        return;
+      }
+
+      lastAutoScreenRef.current = now;
+
+      const axPromise = invoke<string>("read_app_content", { appName: null, multi: true })
+        .catch((e) => { debugLog("ctx", `AX read failed: ${e}`, "warn"); return ""; });
+      const shotPromise = invoke<{ base64: string; app_name: string; display_context?: string }>("capture_screen_now")
+        .catch((e) => { debugLog("ctx", `screenshot failed: ${e}`, "warn"); return null; });
+
+      Promise.all([axPromise, shotPromise]).then(([axText, shot]) => {
+        if (!sessionRef.current) return;
+
+        const truncated = axText && axText.length > 6000
+          ? axText.slice(0, 6000) + "\n...(truncated)"
+          : axText ?? "";
+        // Hash only the truncated payload — that's what the model would see.
+        const axHash = truncated ? cheapHash(truncated) : "";
+        const axChanged = !!axHash && axHash !== lastAxHashRef.current;
+
+        // Reason 3: nothing new on screen — skip injection entirely
+        if (!axChanged && !shot?.base64) {
+          debugLog("ctx", `screen unchanged (hash=${axHash}) — skipping inject`);
+          triggerResponse();
+          return;
+        }
+
+        // Delete previous context (single-image rule)
+        if (lastScreenItemIdRef.current) {
+          try {
+            sessionRef.current.transport.sendEvent({
+              type: "conversation.item.delete",
+              item_id: lastScreenItemIdRef.current,
+            });
+          } catch { /* may already be gone */ }
+        }
+
+        const itemId = `ctx_${now}`;
+        const content: Array<Record<string, string>> = [];
+
+        if (truncated && truncated.trim().length > 20) {
+          content.push({
+            type: "input_text",
+            text: `[Screen content from all visible apps (Accessibility Tree — exact text):\n${truncated}]`,
+          });
+        }
+
+        if (shot?.base64) {
+          content.push({
+            type: "input_image",
+            image_url: `data:image/jpeg;base64,${shot.base64}`,
+          });
+        }
+
+        if (content.length > 0) {
+          try {
+            sessionRef.current.transport.sendEvent({
+              type: "conversation.item.create",
+              item: { id: itemId, type: "message", role: "user", content },
+            });
+            lastScreenItemIdRef.current = itemId;
+            lastAxHashRef.current = axHash;
+            debugLog(
+              "ctx",
+              `injected AX(${axText?.length ?? 0} chars, changed=${axChanged}) + screenshot(${shot ? "yes" : "no"}) | item_id=${itemId}`,
+            );
+          } catch (e) {
+            debugLog("ctx", `inject failed: ${e}`, "warn");
+          }
+        } else {
+          debugLog("ctx", "both AX and screenshot empty — no context injected", "warn");
+        }
+
+        triggerResponse();
+      }).catch((e) => {
+        debugLog("ctx", `context promise failed: ${e}`, "warn");
+        triggerResponse();
+      });
+    };
+    decideAndRespondRef.current = decideAndRespond;
+
     // Raw transport events for real-time transcript display
     session.transport.on("*", (event: Record<string, unknown>) => {
       const type = event.type as string;
 
       switch (type) {
         case "input_audio_buffer.speech_started": {
+          debugLog("turn", "speech_started");
           setAgentState("listening");
           // User is speaking — cancel any inactivity timer (keep conversation alive)
           clearInactivityTimer();
@@ -301,52 +651,45 @@ export function useRealtime(): UseRealtimeReturn {
           break;
         }
 
-        case "input_audio_buffer.speech_stopped":
-          setAgentState("thinking");
-          // Always inject a FRESH screenshot so the model sees the current screen.
-          // This ensures "this/that" always refers to what's visible NOW, not stale context.
-          // Delete the previous screenshot to keep exactly one in context.
-          {
-            const now = Date.now();
-            const elapsed = now - lastAutoScreenRef.current;
-            const pastGreeting = agentResponseCountRef.current >= 1;
-            if (pastGreeting && elapsed >= AUTO_SCREEN_COOLDOWN_MS) {
-              lastAutoScreenRef.current = now;
-              invoke<{ base64: string; app_name: string; display_context?: string }>("capture_screen_now")
-                .then((result) => {
-                  if (result && sessionRef.current) {
-                    // Delete previous screenshot to prevent stale "this" confusion
-                    if (lastScreenItemIdRef.current) {
-                      try {
-                        sessionRef.current.transport.sendEvent({
-                          type: "conversation.item.delete",
-                          item_id: lastScreenItemIdRef.current,
-                        });
-                      } catch { /* old item may already be gone */ }
-                    }
+        case "response.created": {
+          const resp = event.response as Record<string, unknown> | undefined;
+          debugLog("response", `CREATED id=${resp?.id ?? "?"} status=${resp?.status ?? "?"}`);
+          break;
+        }
 
-                    const itemId = `screen_${now}`;
-                    const content: Array<Record<string, string>> = [
-                      { type: "input_image", image_url: `data:image/jpeg;base64,${result.base64}` },
-                    ];
-                    if (result.display_context) {
-                      content.push({ type: "input_text", text: `[Current screen: ${result.display_context}]` });
-                    }
-                    try {
-                      sessionRef.current.transport.sendEvent({
-                        type: "conversation.item.create",
-                        item: { id: itemId, type: "message", role: "user", content },
-                      });
-                      lastScreenItemIdRef.current = itemId;
-                      console.log(`[auto-screen] fresh screenshot injected (${result.app_name})`);
-                    } catch {
-                      console.warn("[auto-screen] send failed — connection may be dead");
-                    }
-                  }
-                })
-                .catch(() => {});
+        case "conversation.item.created": {
+          const item = event.item as Record<string, unknown> | undefined;
+          if (item) {
+            const role = item.role as string | undefined;
+            const itemType = item.type as string | undefined;
+            const itemId = item.id as string | undefined;
+            if (role === "user" || itemType === "function_call" || itemType === "function_call_output") {
+              const content = item.content as Array<Record<string, unknown>> | undefined;
+              const summary = content?.map((c) => `${c.type}:${typeof c.text === "string" ? (c.text as string).slice(0, 60) : ""}`).join("|") ?? "";
+              debugLog("item-created", `role=${role ?? itemType} id=${itemId} content=${summary}`);
             }
           }
+          break;
+        }
+
+        case "input_audio_buffer.speech_stopped":
+          setAgentState("thinking");
+          debugLog("turn", "speech_stopped — waiting for transcript to decide on context");
+          // We DEFER the heavy AX read + screenshot until we know what the user
+          // actually said. Conversational acks like "sounds good" don't need a
+          // fresh screen capture; the prior turn's context is still available.
+          // The transcript event normally arrives within a few hundred ms.
+          // If it doesn't arrive within TRANSCRIPT_WAIT_MS, we fall back to
+          // capturing context anyway (treat as "real query").
+          pendingTurnRef.current = true;
+          if (pendingTurnTimerRef.current) clearTimeout(pendingTurnTimerRef.current);
+          pendingTurnTimerRef.current = setTimeout(() => {
+            if (pendingTurnRef.current) {
+              debugLog("turn", `no transcript after ${TRANSCRIPT_WAIT_MS}ms — capturing context anyway`);
+              pendingTurnRef.current = false;
+              decideAndRespondRef.current?.(""); // empty = treat as real query
+            }
+          }, TRANSCRIPT_WAIT_MS);
           break;
 
         case "conversation.item.input_audio_transcription.completed": {
@@ -354,38 +697,42 @@ export function useRealtime(): UseRealtimeReturn {
           const pendingId = userPendingIdRef.current;
           userPendingIdRef.current = null;
 
+          debugLog("transcript", `user said: "${text}"`);
+
           const isNoise = !text || text.length <= 2;
 
-          // Echo guard: transcriptions arriving shortly after agent speech are
-          // likely the mic picking up speaker output / room reverb.
-          // Greeting window is extra wide (8s) because WebRTC echo cancellation
-          // has no reference data yet. During that window, also drop anything
-          // under 50 chars — greeting echoes are always short fragments.
+          // Relaxed echo guard: rely on WebRTC AEC + post-speech mute (audio_stopped handler).
+          // Only drop confirmed echoes (exact substring of Samuel's last reply or known phrase).
           const msSinceAgentSpoke = Date.now() - lastAgentSpeechEndRef.current;
-          const isGreetingWindow = agentResponseCountRef.current <= 1;
-          const echoWindow = isGreetingWindow ? 8000 : 4000;
+          const echoWindow = 1500;
           const normalized = text ? text.toLowerCase().replace(/[.!?,'"]/g, "").trim() : "";
 
-          // Check if the transcription is a partial echo of what Samuel just said
           const lastAgentLower = lastAgentTextRef.current.toLowerCase();
           const isPartialEcho = normalized.length > 3 && lastAgentLower.includes(normalized);
 
           const isLikelyEcho =
             msSinceAgentSpoke < echoWindow &&
             !!text &&
-            (
-              (isGreetingWindow && text.length < 50) ||
-              text.length < 30 ||
-              ECHO_PHRASES.has(normalized) ||
-              isPartialEcho
-            );
+            (ECHO_PHRASES.has(normalized) || isPartialEcho);
 
           if (isNoise || isLikelyEcho) {
             if (isLikelyEcho) {
-              console.log(`[echo-guard] dropped "${text}" (${msSinceAgentSpoke}ms after agent)`);
+              debugLog("echo-guard", `DROPPED "${text}" (${msSinceAgentSpoke}ms after agent)`);
+            } else if (isNoise) {
+              debugLog("echo-guard", `noise dropped: "${text}"`);
             }
             if (pendingId) {
               setTranscript((prev) => prev.filter((e) => e.id !== pendingId));
+            }
+            // Cancel any pending turn so the fallback timer doesn't fire and
+            // we don't trigger a response for the dropped echo.
+            if (pendingTurnRef.current) {
+              pendingTurnRef.current = false;
+              if (pendingTurnTimerRef.current) {
+                clearTimeout(pendingTurnTimerRef.current);
+                pendingTurnTimerRef.current = null;
+              }
+              debugLog("turn", "pending turn cancelled (echo/noise)");
             }
             break;
           }
@@ -397,6 +744,17 @@ export function useRealtime(): UseRealtimeReturn {
             );
           } else {
             setTranscript((prev) => [...prev, makeEntry("user", text)]);
+          }
+
+          // Now that we have a real transcript, decide whether to refresh
+          // screen context and trigger the response.
+          if (pendingTurnRef.current) {
+            pendingTurnRef.current = false;
+            if (pendingTurnTimerRef.current) {
+              clearTimeout(pendingTurnTimerRef.current);
+              pendingTurnTimerRef.current = null;
+            }
+            decideAndRespondRef.current?.(text);
           }
           break;
         }
@@ -449,7 +807,20 @@ export function useRealtime(): UseRealtimeReturn {
         }
 
         case "response.done": {
-          // Finalize the transcript entry
+          // Log response details so we can see what the model decided
+          const resp = event.response as Record<string, unknown> | undefined;
+          const respStatus = resp?.status as string | undefined;
+          const respOutput = resp?.output as Array<Record<string, unknown>> | undefined;
+          const finalText = lastAgentTextRef.current || assistantBufferRef.current;
+          const toolCalls = (respOutput ?? []).filter((o) => o.type === "function_call" || o.type === "tool_call");
+          debugLog("response", `DONE status=${respStatus} text="${finalText.slice(0, 200)}${finalText.length > 200 ? "..." : ""}" tool_calls=${toolCalls.length}`);
+          if (toolCalls.length > 0) {
+            for (const tc of toolCalls) {
+              const argsStr = typeof tc.arguments === "string" ? tc.arguments.slice(0, 200) : JSON.stringify(tc.arguments).slice(0, 200);
+              debugLog("response", `  └─ tool: ${tc.name ?? "?"} args=${argsStr}`);
+            }
+          }
+
           if (assistantBufferRef.current && assistantEntryIdRef.current) {
             lastAgentTextRef.current = assistantBufferRef.current;
           }
@@ -494,6 +865,9 @@ export function useRealtime(): UseRealtimeReturn {
         case "error": {
           const err = event.error as Record<string, unknown>;
           const msg = (err?.message as string) ?? "Unknown error";
+          const code = err?.code as string | undefined;
+          const type = err?.type as string | undefined;
+          debugLog("session-error", `type=${type} code=${code} msg=${msg}`, "error");
           setTranscript((prev) => [
             ...prev,
             makeEntry("status", `Error: ${msg}`),
@@ -535,17 +909,10 @@ export function useRealtime(): UseRealtimeReturn {
       screenTargetTimerRef.current = setTimeout(() => setScreenTarget(null), 3000);
     });
 
-    // Register text bridge so UI actions can prompt Samuel to speak
+    // Register text bridge so UI actions can prompt Samuel to speak.
+    // Uses SDK's sendMessage() which handles item creation + response trigger.
     registerSendText((text: string) => {
-      session.transport.sendEvent({
-        type: "conversation.item.create",
-        item: {
-          type: "message",
-          role: "user",
-          content: [{ type: "input_text", text }],
-        },
-      });
-      session.transport.sendEvent({ type: "response.create" });
+      session.sendMessage(text);
     });
 
     // Plugin reload: loads all dynamic plugins and updates the live agent.
@@ -560,12 +927,13 @@ export function useRealtime(): UseRealtimeReturn {
         const merged = mergeTools(coreTools, pluginTools);
         let instructions = samuelAgent.instructions as string;
         if (memoryCtx && memoryCtx !== "No prior context.") {
-          instructions += `\n\n# Persistent Memory (from previous sessions)\n${memoryCtx}\nFollow these memories strictly. Do not repeat vocabulary marked as known.`;
+          instructions += `\n\n# Persistent Memory (from previous sessions)\n${memoryCtx}\nFollow these memories strictly. Do not repeat vocabulary marked as known.\nIMPORTANT: Regardless of any language content in memory above, you MUST speak in ENGLISH unless the user explicitly asks otherwise.`;
         }
         const updatedAgent = new RealtimeAgent({
           name: samuelAgent.name,
           instructions,
           tools: merged,
+          voice: "ash",
         });
         await session.updateAgent(updatedAgent);
         console.log(`[plugins] agent updated: ${merged.length} tools (${pluginTools.length} from plugins), memory=${memoryCtx.length > 0 ? "yes" : "no"}`);
@@ -575,36 +943,22 @@ export function useRealtime(): UseRealtimeReturn {
     };
     registerReloadPlugins(doReloadPlugins);
 
-    // Register the image bridge so tools can inject screenshots
+    // Register the image bridge so tools can inject screenshots.
+    // Uses SDK's addImage() — cleaner, handles encoding and error recovery.
     registerSendImage((base64Jpeg: string) => {
-      session.transport.sendEvent({
-        type: "conversation.item.create",
-        item: {
-          type: "message",
-          role: "user",
-          content: [
-            {
-              type: "input_image",
-              image_url: `data:image/jpeg;base64,${base64Jpeg}`,
-            },
-          ],
-        },
-      });
+      session.addImage(`data:image/jpeg;base64,${base64Jpeg}`, { triggerResponse: false });
     });
 
     // Silent context: inject background info Samuel can reference but won't speak about.
-    // Uses a rolling ID so we replace the previous context instead of accumulating
-    // dozens of items that bloat the conversation and slow down the model.
+    // Uses updateHistory to prune the previous context, keeping conversation lean.
     let silentContextId: string | null = null;
     registerSendSilentContext((text: string) => {
-      // Delete previous silent context to keep conversation lean
+      // Prune previous silent context from history
       if (silentContextId) {
-        try {
-          session.transport.sendEvent({
-            type: "conversation.item.delete",
-            item_id: silentContextId,
-          });
-        } catch {}
+        const oldId = silentContextId;
+        session.updateHistory((h: RealtimeItem[]) =>
+          h.filter((item: RealtimeItem) => item.itemId !== oldId)
+        );
       }
       const id = `ctx_${Date.now()}`;
       silentContextId = id;
@@ -621,20 +975,13 @@ export function useRealtime(): UseRealtimeReturn {
 
     // Bridge for learning mode: inject a system hint and trigger Samuel to respond.
     // Skips if the model is already generating a response to avoid session saturation.
+    // Uses SDK's sendMessage() for proper item creation + response trigger.
     registerSendTextAndRespond((text: string) => {
       if (responseInProgressRef.current) {
         console.log("[session] skipping sendTextAndRespond — model is busy");
         return;
       }
-      session.transport.sendEvent({
-        type: "conversation.item.create",
-        item: {
-          type: "message",
-          role: "user",
-          content: [{ type: "input_text", text }],
-        },
-      });
-      session.transport.sendEvent({ type: "response.create" });
+      session.sendMessage(text);
     });
 
     // Inject PCM16 audio clips directly into the session so the model can hear
@@ -713,6 +1060,21 @@ export function useRealtime(): UseRealtimeReturn {
         keyPromise = invoke<string>("create_ephemeral_key");
         ephemeralKey = await Promise.race([keyPromise, timeout]);
       }
+      // Log the session config that will be sent to verify voice
+      const initConfig = await session.getInitialSessionConfig();
+      console.log(`[session] initial config voice: ${(initConfig as Record<string, unknown>).voice ?? "NOT SET"}`, JSON.stringify(initConfig));
+
+      // Inject AEC-enabled mic stream before connecting.
+      // The SDK reads transport.options.mediaStream during connect().
+      if (micStreamRef.current) {
+        const aecStream = await micStreamRef.current;
+        if (aecStream) {
+          const t = session.transport as unknown as { options: { mediaStream?: MediaStream } };
+          t.options.mediaStream = aecStream;
+          console.log("[session] using AEC-enabled mic stream (echoCancellation + noiseSuppression)");
+        }
+      }
+
       await session.connect({ apiKey: ephemeralKey });
 
       setStatus("connected");
@@ -723,65 +1085,58 @@ export function useRealtime(): UseRealtimeReturn {
       // Suppress auto-screen for the first few seconds so the model can greet
       // without being overwhelmed by an image on the very first speech_stopped.
       lastAutoScreenRef.current = Date.now();
-      session.mute(true);
 
       if (isReconnect) {
-        // Replay context so Samuel remembers the conversation
+        // Replay context via updateHistory so Samuel remembers the conversation.
+        // This is cleaner than manual sendEvent — the SDK tracks these items properly.
         const turns = contextRef.current.slice(-CONTEXT_WINDOW_TURNS);
-        for (const turn of turns) {
-          session.transport.sendEvent({
-            type: "conversation.item.create",
-            item: {
-              type: "message",
-              role: turn.role,
-              content: [{ type: "input_text", text: turn.text }],
-            },
-          });
-        }
-        console.log(`[session] restored ${turns.length} context turns`);
+        const historyItems: RealtimeItem[] = turns.map((turn, i) => {
+          if (turn.role === "user") {
+            return {
+              itemId: `ctx_replay_${i}`,
+              type: "message" as const,
+              role: "user" as const,
+              status: "completed" as const,
+              content: [{ type: "input_text" as const, text: turn.text }],
+            };
+          }
+          return {
+            itemId: `ctx_replay_${i}`,
+            type: "message" as const,
+            role: "assistant" as const,
+            status: "completed" as const,
+            content: [{ type: "output_text" as const, text: turn.text }],
+          };
+        });
+        session.updateHistory(historyItems);
+        console.log(`[session] restored ${turns.length} context turns via updateHistory`);
         setTranscript((prev) => [...prev, makeEntry("status", "Session refreshed")]);
 
-        // Don't re-greet — just unmute after a short delay
-        setTimeout(() => {
-          if (!userMutedRef.current && sessionRef.current) {
-            try { sessionRef.current.mute(false); } catch {}
-          }
-        }, 500);
+        // Don't re-greet — SDK keeps mic open natively
       } else {
         setTranscript([makeEntry("status", "Connected")]);
 
-        // Inject local time so Samuel's greeting is time-appropriate
+        // Inject local time so Samuel's greeting is time-appropriate.
+        // Uses sendMessage which creates the item and triggers a response.
         const now = new Date();
-        const timeCtx = `[System: Current local time is ${now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })} on ${now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}. Use this for a time-appropriate greeting.]`;
-        session.transport.sendEvent({
-          type: "conversation.item.create",
-          item: {
-            type: "message",
-            role: "user",
-            content: [{ type: "input_text", text: timeCtx }],
-          },
-        });
+        const timeCtx = `[System: Current local time is ${now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })} on ${now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}. Greet the user in ENGLISH with one short sentence. You MUST speak English.]`;
 
         // Load saved skills and inject summaries so Samuel knows what workflows are available
         invoke<Array<{ id: string; title: string; trigger: string; summary: string }>>("skill_list_summaries")
           .then((skills) => {
+            let fullCtx = timeCtx;
             if (skills.length > 0) {
               const listing = skills.map((s) => `- ${s.title} [${s.id}]: ${s.summary} (trigger: ${s.trigger})`).join("\n");
-              const skillCtx = `[System: You have ${skills.length} saved skill(s). Before complex tasks, check if one applies:\n${listing}\nUse skill_manage(action="get", id="...") to load the full steps.]`;
-              session.transport.sendEvent({
-                type: "conversation.item.create",
-                item: {
-                  type: "message",
-                  role: "user",
-                  content: [{ type: "input_text", text: skillCtx }],
-                },
-              });
+              fullCtx += `\n[System: You have ${skills.length} saved skill(s). Before complex tasks, check if one applies:\n${listing}\nUse skill_manage(action="get", id="...") to load the full steps.]`;
               console.log(`[skills] injected ${skills.length} skill summaries into session`);
             }
+            // Single sendMessage triggers the greeting response
+            session.sendMessage(fullCtx);
           })
-          .catch((err) => console.warn("[skills] failed to load summaries:", err));
-
-        session.transport.sendEvent({ type: "response.create" });
+          .catch(() => {
+            // Skills failed, just send time context
+            session.sendMessage(timeCtx);
+          });
       }
 
       // Load plugins + inject persistent memory in one atomic updateAgent call.
@@ -798,7 +1153,7 @@ export function useRealtime(): UseRealtimeReturn {
 
           // Inject persistent memory so Samuel remembers across sessions
           if (memoryCtx && memoryCtx !== "No prior context.") {
-            instructions += `\n\n# Persistent Memory (from previous sessions)\n${memoryCtx}\nFollow these memories strictly. Do not repeat vocabulary marked as known.`;
+            instructions += `\n\n# Persistent Memory (from previous sessions)\n${memoryCtx}\nFollow these memories strictly. Do not repeat vocabulary marked as known.\nIMPORTANT: Regardless of any language content in memory above, you MUST speak in ENGLISH unless the user explicitly asks otherwise.`;
             console.log(`[memory] injecting ${memoryCtx.length} chars of persistent context`);
           }
 
@@ -814,6 +1169,7 @@ export function useRealtime(): UseRealtimeReturn {
             name: samuelAgent.name,
             instructions,
             tools,
+            voice: "ash",
           });
           session_.updateAgent(updatedAgent).then(() => {
             console.log(`[session] agent updated: ${pluginTools.length} plugin(s), memory=${memoryCtx.length > 0 ? "yes" : "no"}`);
@@ -890,6 +1246,108 @@ export function useRealtime(): UseRealtimeReturn {
     suppressIdleRef.current = suppress;
   }, []);
 
+  // Programmatic interrupt — stops Samuel mid-speech immediately.
+  // Useful for a "stop talking" button or when guardrails need to cut off.
+  const interrupt = useCallback(() => {
+    const session = sessionRef.current;
+    if (session) {
+      try {
+        session.interrupt();
+        responseInProgressRef.current = false;
+        setAgentState("listening");
+        console.log("[session] interrupted by user/system");
+      } catch {}
+    }
+  }, []);
+
+  const approveToolCall = useCallback((entryId: string) => {
+    const item = pendingApprovalsRef.current.get(entryId);
+    if (!item) return;
+    pendingApprovalsRef.current.delete(entryId);
+    sessionRef.current?.approve(item).catch((err: unknown) =>
+      console.error("[approval] approve failed:", err),
+    );
+    setTranscript((prev) =>
+      prev.map((e) =>
+        e.id === entryId && e.approval
+          ? { ...e, approval: { ...e.approval, state: "approved" as const } }
+          : e,
+      ),
+    );
+  }, []);
+
+  const denyToolCall = useCallback((entryId: string) => {
+    const item = pendingApprovalsRef.current.get(entryId);
+    if (!item) return;
+    pendingApprovalsRef.current.delete(entryId);
+    sessionRef.current?.reject(item, { message: "User denied this action." }).catch((err: unknown) =>
+      console.error("[approval] reject failed:", err),
+    );
+    setTranscript((prev) =>
+      prev.map((e) =>
+        e.id === entryId && e.approval
+          ? { ...e, approval: { ...e.approval, state: "denied" as const } }
+          : e,
+      ),
+    );
+  }, []);
+
+  const alwaysAllowApp = useCallback((entryId: string, appName: string) => {
+    // Approve the current request
+    const item = pendingApprovalsRef.current.get(entryId);
+    if (item) {
+      pendingApprovalsRef.current.delete(entryId);
+      sessionRef.current?.approve(item).catch((err: unknown) =>
+        console.error("[approval] approve failed:", err),
+      );
+    }
+    setTranscript((prev) =>
+      prev.map((e) =>
+        e.id === entryId && e.approval
+          ? { ...e, approval: { ...e.approval, state: "approved" as const } }
+          : e,
+      ),
+    );
+    // Persist the "always allow" preference
+    invoke("set_app_permission", { appName, permission: "always_allow" }).catch((err: unknown) =>
+      console.error("[approval] set_app_permission failed:", err),
+    );
+    console.log(`[approval] always allow: ${appName}`);
+  }, []);
+
+  const alwaysDenyApp = useCallback((entryId: string, appName: string) => {
+    const item = pendingApprovalsRef.current.get(entryId);
+    if (item) {
+      pendingApprovalsRef.current.delete(entryId);
+      sessionRef.current?.reject(item, { message: `User permanently denied access to ${appName}.` }).catch((err: unknown) =>
+        console.error("[approval] reject failed:", err),
+      );
+    }
+    setTranscript((prev) =>
+      prev.map((e) =>
+        e.id === entryId && e.approval
+          ? { ...e, approval: { ...e.approval, state: "denied" as const } }
+          : e,
+      ),
+    );
+    invoke("set_app_permission", { appName, permission: "always_deny" }).catch((err: unknown) =>
+      console.error("[approval] set_app_permission failed:", err),
+    );
+    console.log(`[approval] always deny: ${appName}`);
+  }, []);
+
+  const sendText = useCallback((text: string) => {
+    if (!text.trim()) return;
+    setTranscript((prev) => [...prev, makeEntry("user", text.trim())]);
+    recordTurn("user", text.trim());
+    if (!sessionRef.current) return;
+    if (responseInProgressRef.current) {
+      console.log("[session] skipping sendText — model is busy");
+      return;
+    }
+    sessionRef.current.sendMessage(text);
+  }, [recordTurn]);
+
   return {
     status,
     transcript,
@@ -902,5 +1360,11 @@ export function useRealtime(): UseRealtimeReturn {
     setWakeWordMode,
     setSuppressIdle,
     prefetchKey,
+    interrupt,
+    approveToolCall,
+    denyToolCall,
+    alwaysAllowApp,
+    alwaysDenyApp,
+    sendText,
   };
 }

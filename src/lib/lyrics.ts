@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke-bridge";
 import type { ContentLine } from "./session-bridge";
 
 // ── YouTube metadata via oEmbed ──────────────────────────────────────────────

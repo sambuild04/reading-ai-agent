@@ -19,7 +19,7 @@
  *   ui.hidePanel(id)              → void    (remove a custom overlay)
  */
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke-bridge";
 import type { FunctionTool } from "@openai/agents/realtime";
 import { applyUIUpdate } from "./session-bridge";
 

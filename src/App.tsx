@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { LogicalSize } from "@tauri-apps/api/dpi";
+import { invoke } from "./lib/invoke-bridge";
+import { getCurrentWindow, LogicalSize } from "./lib/electron-window";
 import { useRealtime } from "./hooks/useRealtime";
 import { useWakeWord } from "./hooks/useWakeWord";
 import { useRecordMode } from "./hooks/useRecordMode";
@@ -37,6 +36,11 @@ export default function App() {
     setWakeWordMode,
     setSuppressIdle,
     prefetchKey,
+    approveToolCall,
+    denyToolCall,
+    alwaysAllowApp,
+    alwaysDenyApp,
+    sendText,
   } = useRealtime();
 
   const record = useRecordMode();
@@ -293,7 +297,7 @@ export default function App() {
   return (
     <div ref={containerRef} className={`flex h-screen flex-col ${lyricsActive ? "lyrics-active" : ""}`} style={ui.cssVars as React.CSSProperties}>
       {/* Compact header — draggable region for borderless window */}
-      <div data-tauri-drag-region className="flex items-center justify-between px-5 py-2">
+      <div className="drag-region flex items-center justify-between px-5 py-2">
         <StatusBar
           agentState={agentState}
           status={status}
@@ -375,27 +379,27 @@ export default function App() {
         onTogglePanel={record.togglePanel}
         onClearAnalysis={record.clearAnalysis}
         onMailboxToggle={() => setEnvelopeOpen((o) => !o)}
+        onWakeUp={handleWakeDetected}
         envelopeSlot={
           <TeachDrop
             visible={envelopeOpen}
             onToggle={() => setEnvelopeOpen(false)}
             onDrop={(input) => {
               setEnvelopeOpen(false);
-              sendTextAndRespond(
-                `[System: The user sent this via the chat input: "${input}". ` +
-                `This could be anything — a question, pasted content with instructions, a YouTube link, ` +
-                `an article URL, an API key, raw text, an image, or a mix of content and a request. ` +
-                `Read the full message to understand what the user wants. ` +
-                `If they included a question or instruction (e.g. "what is this?", "explain this", ` +
-                `"teach me"), follow their request. ` +
-                `If it's just a YouTube link with no instruction, load the song for teaching. ` +
-                `If it looks like an API key or token, ask what it's for so you can store it with store_secret. ` +
-                `If they want to see content displayed, use show_content to render it in a panel. ` +
-                `If ambiguous, just respond naturally to what they wrote.]`,
-              );
+              if (input.startsWith("data:image/")) {
+                sendTextAndRespond(
+                  `[System: The user pasted an image via chat. Describe what you see and ask if they need help with it.]`,
+                );
+              } else {
+                sendText(input);
+              }
             }}
           />
         }
+        onApproveToolCall={approveToolCall}
+        onDenyToolCall={denyToolCall}
+        onAlwaysAllowApp={alwaysAllowApp}
+        onAlwaysDenyApp={alwaysDenyApp}
       />
 
       {/* Tool-driven word card — only shown when Samuel decides to */}

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../lib/invoke-bridge";
 import type { UIPreferences } from "../hooks/useUIPreferences";
 
 type ToggleKey = "privacy.screen_watch" | "privacy.audio_listen" | "privacy.local_time" | "privacy.location";

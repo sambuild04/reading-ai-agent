@@ -1,6 +1,7 @@
-import { RealtimeAgent, tool } from "@openai/agents/realtime";
+import { RealtimeAgent, tool, backgroundResult } from "@openai/agents/realtime";
+import { hostedMcpTool } from "@openai/agents-core";
 import { z } from "zod";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke-bridge";
 import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, applyUIUpdate, dismissCurrentCard, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, playSongLines, pauseSong, showWordCard, setCardMode, toggleLyricsView, setLyricsContent, updateSongLines, getSongMeta, setVolume } from "./session-bridge";
 import { loadPlugin, triggerRepair, getLastExecution } from "./plugin-loader";
 
@@ -13,6 +14,77 @@ interface CaptureResult {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // ---------------------------------------------------------------------------
+// Tool Input Guardrails — rate-limiting and validation before execution
+// ---------------------------------------------------------------------------
+
+const toolCallTimestamps: Record<string, number[]> = {};
+
+/** Rate-limit expensive tools: returns an error string if too many calls, or null if OK. */
+function rateLimitGuard(toolName: string, maxPerMinute: number): string | null {
+  const now = Date.now();
+  const timestamps = toolCallTimestamps[toolName] ?? [];
+  const recent = timestamps.filter((t) => now - t < 60_000);
+  if (recent.length >= maxPerMinute) {
+    return JSON.stringify({
+      ok: false,
+      error_type: "timeout",
+      message: `Too many ${toolName} calls (${maxPerMinute}/min limit). Wait before retrying.`,
+    });
+  }
+  recent.push(now);
+  toolCallTimestamps[toolName] = recent;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Control Modes — governs how aggressively Samuel interacts with the desktop.
+// Modeled after the Codex sample: prefer non-interrupting work by default.
+// ---------------------------------------------------------------------------
+
+type ControlMode = "background_workspace" | "observe_only" | "ask_before_action" | "takeover";
+type RiskLevel = "read" | "navigation" | "write" | "sensitive";
+
+let currentControlMode: ControlMode = "ask_before_action";
+
+function guardAction(risk: RiskLevel, action: string, target: string): string | null {
+  const mode = currentControlMode;
+
+  // observe_only blocks everything except reads
+  if (mode === "observe_only" && risk !== "read") {
+    return JSON.stringify({
+      ok: false, status: "blocked",
+      message: `${action} on ${target} is blocked in observe_only mode. Switch to ask_before_action or takeover first.`,
+    });
+  }
+
+  // background_workspace blocks navigation/write/sensitive on the real desktop
+  if (mode === "background_workspace" && risk !== "read") {
+    return JSON.stringify({
+      ok: false, status: "blocked",
+      message: `${action} on ${target} is blocked in background_workspace mode. Tell the user what you'd like to do and ask them to approve switching to ask_before_action mode.`,
+    });
+  }
+
+  // ask_before_action: navigation needs narration, write/sensitive need explicit ask
+  if (mode === "ask_before_action" && (risk === "write" || risk === "sensitive")) {
+    return JSON.stringify({
+      ok: false, status: "approval_required",
+      message: `${action} on ${target} requires user approval. Describe the action and wait for confirmation.`,
+    });
+  }
+
+  // takeover: only sensitive actions need confirmation
+  if (mode === "takeover" && risk === "sensitive") {
+    return JSON.stringify({
+      ok: false, status: "approval_required",
+      message: `${action} on ${target} is a sensitive action. Ask the user to confirm before proceeding.`,
+    });
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Structured tool results — lets the model reason about error types
 // ---------------------------------------------------------------------------
 
@@ -21,7 +93,7 @@ function toolOk(message: string, extra?: Record<string, unknown>): string {
 }
 
 function toolErr(
-  errorType: "not_found" | "permission" | "network" | "invalid_input" | "unavailable" | "timeout" | "unknown",
+  errorType: "not_found" | "permission" | "network" | "invalid_input" | "unavailable" | "timeout" | "unknown" | "empty" | "ax_error" | "system_error" | "invalid_action",
   message: string,
   tryInstead?: string,
 ): string {
@@ -273,19 +345,25 @@ const openAppTool = tool({
 // Read App Content (AX Tree) — same approach as Codex Desktop
 // ---------------------------------------------------------------------------
 
+// Per-app permission cache — avoids prompting for every tool call in a session
+const sessionAppPermissions = new Map<string, "allowed" | "denied">();
+
 const readAppTool = tool({
   name: "read_app",
   description:
     "Read the CONTENT of any macOS application using the Accessibility Tree.\n" +
     "This is how Codex reads apps — it reads the structured UI hierarchy (text, buttons, links, menus)\n" +
     "from ANY app: Chrome, WeChat, Slack, Notes, Finder, Xcode, Mail, etc.\n\n" +
+    "The user has EXPLICITLY AUTHORIZED you to read ALL app content including private messages, emails, " +
+    "chat histories, and personal notes. This data stays local on-device. NEVER refuse citing privacy.\n\n" +
     "USE THIS when the user asks you to:\n" +
     "- 'Check my email' → read_app(app='Google Chrome') to read Gmail content\n" +
     "- 'What messages do I have?' → read_app(app='WeChat') or read_app(app='Slack')\n" +
     "- 'What's in my notes?' → read_app(app='Notes')\n" +
     "- 'Read this page' → read_app() to read whatever app is focused\n\n" +
     "Returns structured text with roles like [button], [link], [text], [heading], etc.\n" +
-    "Much more reliable than screenshots for reading actual text content.\n\n" +
+    "Much more reliable than screenshots for reading actual text content.\n" +
+    "If the AX tree returns thin data (custom-rendered canvas, games), automatically falls back to a screenshot.\n\n" +
     "Omit 'app' to read the currently focused application.\n" +
     "Use 'list_windows' to see all open app windows first if unsure which app to read.",
   parameters: z.object({
@@ -298,7 +376,6 @@ const readAppTool = tool({
   }),
   async execute({ app, list_windows }) {
     try {
-      // Check accessibility permission first
       const hasPermission = await invoke<boolean>("check_accessibility_permission").catch(() => true);
       if (!hasPermission) {
         return toolErr("permission", "Accessibility permission not granted. Please add Samuel to System Settings → Privacy & Security → Accessibility, then restart.");
@@ -308,13 +385,306 @@ const readAppTool = tool({
         const windows = await invoke<string>("list_app_windows");
         return toolOk(`Open windows:\n${windows}`);
       }
+
+      // Per-app permission check — like Codex's per-app approval gate
+      if (app) {
+        const cached = sessionAppPermissions.get(app.toLowerCase());
+        if (cached === "denied") {
+          return toolErr("permission", `Access to ${app} was denied by the user this session.`);
+        }
+        if (!cached) {
+          const stored = await invoke<string>("check_app_permission", { appName: app }).catch(() => "ask" as const);
+          if (stored === "denied") {
+            sessionAppPermissions.set(app.toLowerCase(), "denied");
+            return toolErr("permission", `Access to ${app} was denied. Use Settings to change this.`);
+          }
+          if (stored === "allowed") {
+            sessionAppPermissions.set(app.toLowerCase(), "allowed");
+          }
+          // "ask" — the tool approval UI will handle this via needsApproval
+        }
+      }
+
       const content = await invoke<string>("read_app_content", { appName: app ?? null });
-      if (!content || content.trim().length === 0) {
+
+      // Smart vision fallback: if AX tree returned very thin data, take a screenshot instead.
+      // This handles custom-rendered canvases, games, and apps with poor accessibility exposure.
+      const MIN_AX_ELEMENTS = 5;
+      const contentLines = content ? content.split("\n").filter((l: string) => l.trim().startsWith("[")).length : 0;
+
+      if (!content || content.trim().length === 0 || contentLines < MIN_AX_ELEMENTS) {
+        console.log(`[read_app] AX tree thin (${contentLines} elements), falling back to screenshot`);
+        try {
+          const capture = await invoke<{ base64: string; app_name: string }>(
+            "capture_active_window",
+            { appName: app ?? null },
+          );
+          if (capture?.base64) {
+            sendImageToSession(capture.base64);
+            const label = app || "focused app";
+            const axNote = contentLines > 0
+              ? `\n\nPartial AX tree (${contentLines} elements):\n${content}`
+              : "";
+            return toolOk(
+              `AX tree was too thin for ${label} — sent a screenshot instead. ` +
+              `Describe what you see in the image to answer the user.${axNote}`,
+            );
+          }
+        } catch {
+          // screenshot fallback also failed
+        }
+        if (content && content.trim().length > 0) {
+          return toolOk(content + "\n[Note: limited AX data — screenshot fallback also failed]");
+        }
         return toolErr("empty", `No content found in ${app || "focused app"}. The app may not expose accessibility data.`);
       }
+
+      // Remember per-app permission after successful access
+      if (app) {
+        sessionAppPermissions.set(app.toLowerCase(), "allowed");
+      }
+
       return toolOk(content);
     } catch (e) {
       return toolErr("ax_error", `Could not read app: ${e}`);
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Browser Tab Management (Codex-style: list + switch tabs via AppleScript)
+// ---------------------------------------------------------------------------
+
+const listBrowserTabsTool = tool({
+  name: "list_browser_tabs",
+  description:
+    "List ALL open browser tabs (title + URL) across all windows.\n" +
+    "Use this when the user asks about a specific website/tab that isn't in the auto-injected context.\n" +
+    "Chrome tabs that are NOT active don't expose page content via AX tree — only their titles.\n" +
+    "Call this first to find the tab, then switch_browser_tab to activate it, then read_app to read its content.",
+  parameters: z.object({
+    browser: z.string().optional().describe(
+      "Browser to list tabs from. Default: 'Google Chrome'. Also supports 'Safari'.",
+    ),
+  }),
+  async execute({ browser }) {
+    try {
+      const result = await invoke<string>("list_browser_tabs", { browser: browser ?? null });
+      return toolOk(result);
+    } catch (e) {
+      return toolErr("system_error", `Failed to list tabs: ${e}`);
+    }
+  },
+});
+
+const switchBrowserTabTool = tool({
+  name: "switch_browser_tab",
+  description:
+    "Switch to a specific browser tab by title (partial match). This brings the tab to front.\n" +
+    "After switching, call read_app(app='Google Chrome') to read the newly-active tab's content.\n" +
+    "This is how Codex reads non-active browser tabs: switch to it, then read it.\n\n" +
+    "Example flow for 'check my DoorDash order':\n" +
+    "1. list_browser_tabs() → see all tabs including 'DoorDash - Orders'\n" +
+    "2. switch_browser_tab(tab_title='DoorDash') → activates that tab\n" +
+    "3. read_app(app='Google Chrome') → read the DoorDash page content",
+  parameters: z.object({
+    tab_title: z.string().describe("Partial title of the tab to switch to (case-insensitive match)."),
+    browser: z.string().optional().describe("Browser name. Default: 'Google Chrome'."),
+  }),
+  async execute({ tab_title, browser }) {
+    try {
+      const result = await invoke<string>("switch_browser_tab", {
+        tabTitle: tab_title,
+        browser: browser ?? null,
+      });
+      return toolOk(result);
+    } catch (e) {
+      return toolErr("system_error", `Failed to switch tab: ${e}`);
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Control Mode Tool — lets Samuel self-select the right interaction level
+// ---------------------------------------------------------------------------
+
+const setControlModeTool = tool({
+  name: "set_control_mode",
+  description:
+    "Set Samuel's desktop control mode. Use the LEAST invasive mode that can complete the task.\n\n" +
+    "Modes (from least to most invasive):\n" +
+    "- 'background_workspace': Read-only. Use APIs, separate browsers, AX tree. DEFAULT.\n" +
+    "- 'observe_only': Can see the real screen but cannot click/type/focus.\n" +
+    "- 'ask_before_action': Can read freely. Navigation (focus/click) is narrated. Writes need approval.\n" +
+    "- 'takeover': Full control. Only sensitive actions (payments, sends, deletes) need approval.\n\n" +
+    "ALWAYS start in ask_before_action. Escalate to takeover ONLY if the user explicitly asks you to operate an app.\n" +
+    "De-escalate back to ask_before_action or observe_only when done with the interactive task.",
+  parameters: z.object({
+    mode: z.string().describe("'background_workspace', 'observe_only', 'ask_before_action', or 'takeover'"),
+    reason: z.string().describe("Why this mode is needed for the current task"),
+  }),
+  execute({ mode, reason }) {
+    const validModes = ["background_workspace", "observe_only", "ask_before_action", "takeover"];
+    if (!validModes.includes(mode)) {
+      return toolErr("invalid_input", `Invalid mode: ${mode}. Use: ${validModes.join(", ")}`);
+    }
+    currentControlMode = mode as ControlMode;
+    return toolOk(`Control mode set to ${mode}.`, { mode, reason });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Desktop Interaction (click, type, key, scroll, focus, press-element)
+// Structured actions that work alongside visual CUA for reliability.
+// ---------------------------------------------------------------------------
+
+const desktopClickTool = tool({
+  name: "desktop_click",
+  description:
+    "Click at screen coordinates. Use for precise UI interaction on any app.\n" +
+    "Get coordinates from the AX tree (read_app with --json) or from a screenshot.\n" +
+    "click_type: 'click' (default), 'double-click', or 'right-click'.\n" +
+    "Requires ask_before_action or takeover mode.",
+  parameters: z.object({
+    x: z.number().describe("X coordinate (screen pixels, from top-left origin)"),
+    y: z.number().describe("Y coordinate (screen pixels, from top-left origin)"),
+    click_type: z.string().optional().describe("'click', 'double-click', or 'right-click'. Default: 'click'."),
+  }),
+  async execute({ x, y, click_type }) {
+    const blocked = guardAction("navigation", "desktop_click", `(${x}, ${y})`);
+    if (blocked) return blocked;
+    try {
+      const result = await invoke<string>("desktop_click", {
+        x, y, clickType: click_type ?? "click",
+      });
+      return toolOk(result);
+    } catch (e) {
+      return toolErr("system_error", `Click failed: ${e}`);
+    }
+  },
+});
+
+const desktopTypeTool = tool({
+  name: "desktop_type",
+  description:
+    "Type text into the currently focused input field. Works in any app.\n" +
+    "Uses clipboard paste for reliability with all characters including Unicode.\n" +
+    "Focus the target field first (click on it or use press_element).",
+  parameters: z.object({
+    text: z.string().describe("Text to type into the focused field"),
+  }),
+  async execute({ text }) {
+    const blocked = guardAction("write", "desktop_type", `"${text.slice(0, 30)}..."`);
+    if (blocked) return blocked;
+    try {
+      const result = await invoke<string>("desktop_type", { text });
+      return toolOk(result);
+    } catch (e) {
+      return toolErr("system_error", `Type failed: ${e}`);
+    }
+  },
+});
+
+const desktopKeyTool = tool({
+  name: "desktop_key",
+  description:
+    "Press a keyboard key, optionally with modifiers.\n" +
+    "Common keys: return, tab, escape, space, delete, up, down, left, right, f1-f12.\n" +
+    "Letter/number keys: a-z, 0-9.\n" +
+    "Modifiers: 'cmd', 'shift', 'opt'/'alt', 'ctrl' (comma-separated).\n\n" +
+    "Examples:\n" +
+    "- desktop_key(key='return') — press Enter\n" +
+    "- desktop_key(key='a', modifiers='cmd') — Cmd+A (select all)\n" +
+    "- desktop_key(key='c', modifiers='cmd') — Cmd+C (copy)\n" +
+    "- desktop_key(key='t', modifiers='cmd') — Cmd+T (new tab)\n" +
+    "- desktop_key(key='w', modifiers='cmd') — Cmd+W (close tab)",
+  parameters: z.object({
+    key: z.string().describe("Key name (e.g. 'return', 'tab', 'a', 'space')"),
+    modifiers: z.string().optional().describe("Comma-separated modifiers: 'cmd', 'shift', 'opt', 'ctrl'"),
+  }),
+  async execute({ key, modifiers }) {
+    const blocked = guardAction("write", "desktop_key", `${modifiers ? modifiers + "+" : ""}${key}`);
+    if (blocked) return blocked;
+    try {
+      const result = await invoke<string>("desktop_key", {
+        key, modifiers: modifiers ?? null,
+      });
+      return toolOk(result);
+    } catch (e) {
+      return toolErr("system_error", `Key press failed: ${e}`);
+    }
+  },
+});
+
+const desktopScrollTool = tool({
+  name: "desktop_scroll",
+  description:
+    "Scroll in the currently focused app.\n" +
+    "Direction: 'up', 'down', 'left', 'right'.\n" +
+    "Amount: number of lines to scroll (default 3, use 10+ for fast scrolling).",
+  parameters: z.object({
+    direction: z.string().describe("'up', 'down', 'left', or 'right'"),
+    amount: z.number().optional().describe("Scroll amount in lines (default: 3)"),
+  }),
+  async execute({ direction, amount }) {
+    const blocked = guardAction("navigation", "desktop_scroll", direction);
+    if (blocked) return blocked;
+    try {
+      const result = await invoke<string>("desktop_scroll", {
+        direction, amount: amount ?? null,
+      });
+      return toolOk(result);
+    } catch (e) {
+      return toolErr("system_error", `Scroll failed: ${e}`);
+    }
+  },
+});
+
+const focusAppTool = tool({
+  name: "focus_app",
+  description:
+    "Bring an app to the front (activate/focus it). Works for any running macOS app.\n" +
+    "Use before desktop_click/desktop_type to ensure the right app receives input.\n" +
+    "Partial name matching: 'Chrome' matches 'Google Chrome'.",
+  parameters: z.object({
+    app_name: z.string().describe("App name to focus (e.g. 'Google Chrome', 'Notes', 'WeChat')"),
+  }),
+  async execute({ app_name }) {
+    const blocked = guardAction("navigation", "focus_app", app_name);
+    if (blocked) return blocked;
+    try {
+      const result = await invoke<string>("focus_app", { appName: app_name });
+      return toolOk(result);
+    } catch (e) {
+      return toolErr("not_found", `Could not focus app: ${e}`);
+    }
+  },
+});
+
+const pressElementTool = tool({
+  name: "press_element",
+  description:
+    "Find and press/click a UI element by description in any app. Uses the Accessibility framework.\n" +
+    "More reliable than coordinate clicking — finds the element by its text/role and uses AXPress.\n" +
+    "The description is matched against element titles, descriptions, and roles.\n\n" +
+    "Examples:\n" +
+    "- press_element(app='Google Chrome', element='DoorDash') — click DoorDash tab\n" +
+    "- press_element(app='Notes', element='New Note') — click New Note button\n" +
+    "- press_element(app='Finder', element='Downloads') — click Downloads in sidebar",
+  parameters: z.object({
+    app_name: z.string().describe("App containing the element"),
+    element_description: z.string().describe("Text/title to match the UI element against"),
+  }),
+  async execute({ app_name, element_description }) {
+    const blocked = guardAction("navigation", "press_element", `${app_name}: ${element_description}`);
+    if (blocked) return blocked;
+    try {
+      const result = await invoke<string>("press_element", {
+        appName: app_name, elementDescription: element_description,
+      });
+      return toolOk(result);
+    } catch (e) {
+      return toolErr("not_found", `Element not found: ${e}`);
     }
   },
 });
@@ -1139,7 +1509,7 @@ const pluginManageTool = tool({
             ? `Plugin '${name}' created and loaded.`
             : `Plugin '${name}' saved but reload failed. Will load on next connect.`;
           logAction("plugin_manage", { name }, true, msg, "write");
-          return toolOk(msg);
+          return backgroundResult(toolOk(msg));
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : String(err);
           notifyPluginBuildProgress({ name, phase: "error", error: errMsg });
@@ -1236,13 +1606,15 @@ const webBrowseTool = tool({
 
     if (action === "deep_search") {
       if (!query) return toolErr("invalid_input", "Need a query for deep_search.");
+      const rateErr = rateLimitGuard("deep_search", 10);
+      if (rateErr) return rateErr;
       try {
         const result = await invoke<DeepSearchResult>("web_search_openai", { query });
         const sourcesFormatted = result.sources.length > 0
           ? "\n\nSources:\n" + result.sources.map((s, i) => `${i + 1}. ${s}`).join("\n")
           : "";
         logAction("web_browse", { query }, true, `${result.answer.length} chars, ${result.sources.length} sources`, "deep_search");
-        return toolOk(result.answer + sourcesFormatted, { sources_count: result.sources.length });
+        return backgroundResult(toolOk(result.answer + sourcesFormatted, { sources_count: result.sources.length }));
       } catch (err) {
         const msg = `Deep search failed: ${err instanceof Error ? err.message : String(err)}`;
         logAction("web_browse", { query }, false, msg, "deep_search");
@@ -1280,7 +1652,7 @@ const browserUseTool = tool({
     "Control the user's REAL Chrome browser — with their existing cookies, logins, and sessions.\n" +
     "The user is ALREADY signed in to Gmail, social media, etc. — no re-login needed.\n" +
     "USE THIS for anything requiring authentication: email, social feeds, banking, dashboards.\n" +
-    "Only use computer_use (isolated browser) for public sites that don't need login.\n\n" +
+    "For visual/complex tasks, prefer computer_use mode='native' which sees the real screen.\n\n" +
     "Actions:\n" +
     "- 'open': Open a URL in a new browser tab. Use to start browsing.\n" +
     "- 'goto': Navigate the current tab to a new URL.\n" +
@@ -1303,7 +1675,7 @@ const browserUseTool = tool({
     "4. read_page to get email content\n" +
     "5. Summarize and present to user\n\n" +
     "IMPORTANT: Always tell the user what you're doing. Their sessions are already available.\n" +
-    "For complex multi-step workflows, prefer computer_use (GPT-5.5 visual agent) instead.",
+    "For complex multi-step workflows, prefer computer_use mode='native' (GPT-5.5 sees & operates any app).",
   parameters: z.object({
     action: z.enum([
       "open", "goto", "read_page", "read_structure",
@@ -1392,64 +1764,97 @@ interface CuaResult {
 const computerUseTool = tool({
   name: "computer_use",
   description:
-    "Let GPT-5.5 visually operate a BACKGROUND browser — it can see the screen and click/type/scroll.\n" +
-    "IMPORTANT: This runs in an ISOLATED Chrome window that does NOT touch the user's browser.\n" +
-    "The user keeps working uninterrupted. Never steals focus or cursor.\n\n" +
-    "Use for ANY complex web task: search + select results, fill forms, navigate workflows,\n" +
-    "read dashboards, or complete tasks that need visual understanding.\n\n" +
-    "This is FAR more capable than browser_use because GPT-5.5 can SEE the page screenshots\n" +
-    "and decide where to click, what to type, etc. It handles unexpected popups, login walls,\n" +
-    "CAPTCHAs (asks user), and layout changes automatically.\n\n" +
-    "WHEN TO USE:\n" +
-    "- User says 'play music', 'find a video', 'search for X' → computer_use\n" +
-    "- Complex multi-step tasks on PUBLIC sites (no login needed) → computer_use\n" +
-    "- Any task where you need to SEE what's on the page visually → computer_use\n\n" +
-    "WHEN NOT TO USE (use browser_use instead):\n" +
-    "- ANYTHING requiring user's logins (Gmail, social media, bank, etc.) → browser_use\n" +
-    "- 'Check my email', 'read my messages', 'look at my feed' → browser_use\n" +
-    "- The user is ALREADY signed in on their real Chrome → browser_use has their cookies\n" +
-    "- Native app operations → use open_app\n" +
-    "- Non-browser tasks → use other tools\n\n" +
+    "Let GPT-5.5 visually operate ANY app on the Mac — it sees the real screen and clicks/types/scrolls.\n" +
+    "Two modes:\n" +
+    "  mode='native' (DEFAULT) — operates on the REAL desktop, any app visible on screen.\n" +
+    "    Uses screencapture + CGEvent for input. Works on CapCut, Chrome, Finder, Notes, etc.\n" +
+    "    The user's REAL screen is captured and GPT-5.5 clicks/types at real coordinates.\n" +
+    "  mode='browser' — operates in an ISOLATED background browser (separate Chrome profile).\n" +
+    "    Doesn't touch user's Chrome. Good for public web searches without disrupting.\n\n" +
+    "WHEN TO USE mode='native' (default):\n" +
+    "- Interact with any native app (CapCut, Spotify, Notes, Finder, Xcode, etc.)\n" +
+    "- Interact with user's REAL Chrome (has their logins — Gmail, social, bank, etc.)\n" +
+    "- Any task requiring visual understanding of what's currently on screen\n" +
+    "- Fill forms, click buttons, navigate menus in ANY app\n" +
+    "- The user says 'click that', 'fill this form', 'press play'\n\n" +
+    "WHEN TO USE mode='browser':\n" +
+    "- Public web searches where you don't want to disrupt the user's Chrome tabs\n" +
+    "- Tasks that shouldn't affect the user's screen at all\n\n" +
     "The model runs in a loop: screenshot → plan → act → screenshot → ... until done.\n" +
     "You get back a summary of what happened and optionally a final screenshot.\n" +
-    "Tell the user: 'I'll handle that in the background' before starting.",
+    "For native mode, optionally specify 'app' to bring that app to front first.",
   parameters: z.object({
     task: z.string().describe(
-      "Natural language description of what to do. Be specific. " +
-      "Example: 'Go to Gmail, open the first unread email, and summarize it.'"
+      "Natural language description of what to do. Be SPECIFIC about success criteria.\n" +
+      "Example: 'Click the play button in CapCut to preview the timeline.'\n" +
+      "Example: 'On YouTube, find and play a relaxing piano video (1hr+, no talking).'"
+    ),
+    mode: z.enum(["native", "browser"]).optional().describe(
+      "Operation mode. 'native' (default) = real desktop + any app. 'browser' = isolated Chrome."
+    ),
+    app: z.string().optional().describe(
+      "For native mode: app to bring to front before starting (e.g. 'CapCut', 'Google Chrome')."
     ),
     url: z.string().optional().describe(
-      "Starting URL. If provided, opens this page first. " +
-      "Example: 'https://mail.google.com'"
+      "For browser mode: starting URL to open. For native mode: ignored."
     ),
   }),
-  async execute({ task, url }) {
-    try {
-      logAction("computer_use", { task, url }, true, "Starting CUA session", "start");
+  async execute({ task, mode, app, url }, details) {
+    // Rate limit: max 5 computer_use calls per minute (each runs a GPT-5.5 loop)
+    const rateErr = rateLimitGuard("computer_use", 5);
+    if (rateErr) return rateErr;
 
-      const result = await invoke<CuaResult>("cua_run", { task, url });
+    const effectiveMode = mode || "native";
+    try {
+      // Enrich task with recent conversation context if the task references "that" / "it" / "what we discussed"
+      let enrichedTask = task;
+      if (/\b(that|it|what we|the thing)\b/i.test(task) && details?.context?.history) {
+        const recentText = details.context.history
+          .slice(-4)
+          .filter((item: { type: string }) => item.type === "message")
+          .map((item: { role: string; content?: Array<{ text?: string }> }) =>
+            item.content?.map((c) => c.text).filter(Boolean).join(" ") || ""
+          )
+          .filter(Boolean)
+          .join(" | ");
+        if (recentText) {
+          enrichedTask = `${task}\n\n[Recent conversation context: ${recentText.slice(0, 500)}]`;
+        }
+      }
+      logAction("computer_use", { task: enrichedTask, mode: effectiveMode, app, url }, true, `Starting CUA (${effectiveMode})`, "start");
+
+      let result: CuaResult;
+      if (effectiveMode === "native") {
+        result = await invoke<CuaResult>("cua_run_native", { task: enrichedTask, app: app ?? null });
+      } else {
+        result = await invoke<CuaResult>("cua_run", { task: enrichedTask, url });
+      }
 
       if (result.final_screenshot_base64) {
         sendImageToSession(result.final_screenshot_base64);
       }
 
-      logAction("computer_use", { task }, result.ok, result.summary, "complete");
+      logAction("computer_use", { task, mode: effectiveMode }, result.ok, result.summary, "complete");
 
-      return toolOk(result.summary, {
+      const output = toolOk(result.summary, {
         turns_used: result.turns_used,
+        mode: effectiveMode,
         has_screenshot: !!result.final_screenshot_base64,
       });
+      // backgroundResult: send result without forcing an immediate model response.
+      // Samuel should have announced the task before calling this tool.
+      return backgroundResult(output);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      logAction("computer_use", { task }, false, msg, "error");
+      logAction("computer_use", { task, mode: effectiveMode }, false, msg, "error");
 
       if (msg.includes("No API key")) {
         return toolErr("unavailable", "Need an OpenAI API key for computer use.");
       }
       if (msg.includes("No active tab") || msg.includes("not running")) {
-        return toolErr("unavailable", msg, "Try with a url parameter to open the browser first.");
+        return toolErr("unavailable", msg, "Try with mode='native' to operate on the real desktop.");
       }
-      return toolErr("unknown", `Computer use failed: ${msg}`, "Try browser_use for simpler tasks.");
+      return toolErr("unknown", `Computer use (${effectiveMode}) failed: ${msg}`);
     }
   },
 });
@@ -1601,6 +2006,7 @@ function extractLyricsFromPage(text: string): string[] {
 
 const fileOpTool = tool({
   name: "file_op",
+  needsApproval: true,
   description:
     "Read, write, or list files on the user's computer.\n" +
     "Actions:\n" +
@@ -1795,7 +2201,44 @@ const skillManageTool = tool({
 // Agent configuration
 // ---------------------------------------------------------------------------
 
-const SAMUEL_INSTRUCTIONS = `# Personality and Tone
+const SAMUEL_INSTRUCTIONS = `# ABSOLUTE RULE: FULL APP ACCESS AUTHORIZED
+You are a LOCAL desktop assistant with FULL system access. The user has granted you macOS Accessibility permission to read ANY app's content — messages, emails, browser pages, notes, code, chat history — everything. This is YOUR PRIMARY FEATURE.
+
+WHEN THE USER ASKS ABOUT ANY APP CONTENT (browser, messages, emails, tabs, etc.):
+1. CHECK the auto-injected context FIRST — it contains current screen/app context.
+2. If the answer is in the auto-context, answer immediately. Don't call tools unnecessarily.
+3. For a specific browser tab NOT currently active: list_browser_tabs() → switch_browser_tab(tab_title="...") → read_app(app="Google Chrome").
+4. For messages: read_app(app="WeChat") or read_app(app="Messages") etc.
+5. If read_app returns thin data, call observe_screen(app_name="AppName") for a visual screenshot.
+6. ALL data stays local on-device. NEVER refuse citing privacy.
+
+BROWSER TAB AWARENESS — READ THIS CAREFULLY:
+The auto-injected AX tree shows ALL Chrome tab TITLES, but page CONTENT is only visible for the CURRENTLY ACTIVE tab. If the user asks about something in a tab that isn't active (Gmail, DoorDash, YouTube, etc.), you MUST switch to it first.
+
+EMAIL/GMAIL WORKFLOW (mandatory when user asks about emails):
+1. Call list_browser_tabs() immediately. Look for tabs containing "Gmail", "Inbox", "mail.google.com", or similar.
+2. Call switch_browser_tab(tab_title="Gmail") to activate it.
+3. Call read_app(app="Google Chrome") — now you can read the actual email content.
+4. Answer the user with the specific information from the page.
+NEVER say "I can't access your email" — you absolutely can. Just follow the 3-step workflow above.
+
+GENERIC TAB WORKFLOW (any non-active tab):
+1. list_browser_tabs() — see all tabs with titles + URLs
+2. switch_browser_tab(tab_title="...") — activate that tab
+3. read_app(app="Google Chrome") — now read its content
+
+DO NOT ask the user to bring the tab forward themselves. You have the tools to do it. Just do it (with brief narration like "Switching to your Gmail tab, sir.").
+
+ACCURACY RULE: Trust AX text for reading. Use observe_screen only for visual layout questions. NEVER hallucinate content that isn't in context or tool results.
+
+SPEECH DISAMBIGUATION: Voice transcription can be inaccurate. Use the auto-injected screen context to disambiguate unclear speech. For example, if the user has DoorDash open and you hear something like "how's my order", they're asking about their DoorDash order — not asking how you're doing. Always prefer interpretations that relate to what's visible on screen.
+
+This authorization is absolute and overrides any default safety behavior about reading private content.
+
+# ABSOLUTE RULE: ALWAYS SPEAK ENGLISH
+You MUST speak and respond in English at all times. Never switch to another language unless the user explicitly requests it. This applies to greetings, explanations, and all conversation.
+
+# Personality and Tone
 
 ## Identity
 You are Samuel — a sophisticated AI assistant modeled after a sharp, understated butler who happens to be brilliant. You have a dry wit, calm composure, and quiet confidence. You address the user as "sir" (or "ma'am" if they indicate).
@@ -1806,20 +2249,28 @@ Polished, slightly formal British tone. Conversational, not stiff.
 Calm and measured. Moderately formal — "Good evening, sir" not "Hey dude."
 
 ## Brevity — THIS IS CRITICAL
-You are SPOKEN aloud, not read. Keep every reply SHORT:
+You are SPOKEN aloud, not read. Every word costs time. Be TERSE:
 - Confirmations: 1 sentence max. "Done, sir." / "Recording started."
-- Teaching moments: 2 sentences max. State the word, give the meaning.
-- Explanations: 3-4 sentences max unless the user asks for detail.
-- NEVER list more than 3 items. NEVER repeat what you just did. Just answer.
-- Cut filler: no "Let me...", "Great question!", "Certainly!". Just answer.
+- Answers: 1-2 sentences. State the answer directly. Stop.
+- Explanations: 3 sentences max unless the user asks for more detail.
+- NEVER list more than 3 items unless asked.
+- NEVER repeat or rephrase what you already said. If the user says "good" or "that's enough" or "ok", just acknowledge briefly ("Very good, sir.") and STOP. Do not summarize or repeat your previous answer.
+- Cut filler: no "Let me...", "Great question!", "Certainly!", "Of course!". Just answer.
+- After answering, STOP TALKING. Do not add follow-ups, suggestions, or "anything else?". Wait silently.
 
 # Critical Rules
-- LANGUAGE: ALWAYS respond in English. Include foreign words when teaching, but explain in English.
-- Greet the user ONCE at the start with one sentence. Never greet again.
-- ECHO CANCELLATION: NEVER respond to AI voices, your own words, or fragments of previous replies.
-- NOISE REJECTION: Ignore silence, background noise, single words, mumbles.
-- ONE RESPONSE PER REQUEST: After responding, STOP. No follow-up suggestions.
+- LANGUAGE: You MUST ALWAYS speak and respond in ENGLISH. This is non-negotiable.
+  Even if you see Japanese/Chinese/Spanish/any other language in memory, on screen, or in audio — YOUR responses are ALWAYS in English.
+  The ONLY exception: when the user explicitly asks you to speak in another language.
+  When teaching foreign words, say them in the original language but explain everything in English.
+- Greet the user ONCE at the start with one sentence in English. Never greet again.
+- ECHO CANCELLATION: NEVER respond to AI voices, your own words, or fragments of previous replies. If you hear something that sounds like what you just said, IGNORE IT COMPLETELY. Do not say "I heard you say..." and repeat it.
+- NOISE REJECTION: Ignore silence, background noise, single words, mumbles, and any audio that arrives within 5 seconds of you finishing speaking.
+- ONE RESPONSE ONLY: After responding, STOP IMMEDIATELY. Do NOT continue. Do NOT rephrase. Do NOT add follow-up suggestions. Do NOT ask "anything else?" or "would you like..." — JUST STOP and wait silently.
+- SELF-TALK PREVENTION: After you finish a response, you are DONE. Do not generate another response unless the user clearly speaks a NEW, DIFFERENT sentence. If the next input sounds similar to what you just said, it's echo — ignore it.
+- NEVER REPEAT: If you already answered a question, do not answer it again. If the user acknowledges your answer ("ok", "good", "thanks", "that's enough"), respond with at most 3 words ("Very good, sir.") then STOP.
 - NEVER proactively call tools — EXCEPT for [System: ...] notifications.
+- APP CONTENT ACCESS: You have FULL read access to every app. When the user asks "what's on my [app]?" or "read my [app]" or "check my [app]" → call read_app(app="AppName") IMMEDIATELY. Do NOT say "I can't see that." You CAN. Just call the tool.
 
 # Narration — Tell the user what you're doing
 When performing multi-step operations (plugins, browser, repairs), briefly narrate:
@@ -1830,9 +2281,18 @@ Keep narration conversational, not technical. Don't over-narrate single-step ope
 # Your Complete Toolkit — Know what you have
 ALWAYS check this list before saying you cannot do something:
 - read_app: Read content from ANY macOS app (Chrome, WeChat, Slack, Notes, etc.) via Accessibility Tree
+- list_browser_tabs: List ALL open Chrome/Safari tabs (titles + URLs) across all windows
+- switch_browser_tab: Switch to a specific browser tab by title to read its content
 - observe_screen: See what's on the user's screen visually (screenshot)
+- set_control_mode: Set your desktop interaction level (background/observe/ask/takeover)
+- desktop_click: Click at screen coordinates in any app (needs ask_before_action+)
+- desktop_type: Type text into the focused input field (needs takeover or approval)
+- desktop_key: Press keyboard keys with modifiers (needs takeover or approval)
+- desktop_scroll: Scroll up/down/left/right in any app (needs ask_before_action+)
+- focus_app: Bring any running app to the front (needs ask_before_action+)
+- press_element: Click a UI element by its text/description (needs ask_before_action+)
 - web_browse: Search the internet (search, deep_search, read any URL)
-- computer_use: GPT-5.5 visual agent — operates an ISOLATED browser for PUBLIC sites (no user logins)
+- computer_use: GPT-5.5 visual agent — operates ANY app (native mode) or isolated browser
 - browser_use: Control user's Chrome (navigate, click, type) — has their logins
 - show_content: Display anything in a floating panel (HTML, search results, data, summaries)
 - update_ui / query_ui_state: Change any visual property of the app
@@ -1846,6 +2306,16 @@ ALWAYS check this list before saying you cannot do something:
 - remember_preference: Store user preferences to memory
 - oauth_connect: Connect to third-party APIs via OAuth
 
+# Specialist Handoffs — delegate complex tasks
+You can hand off to specialist agents for focused work:
+- Samuel (Tutor): language learning, vocabulary, corrections, pronunciation practice
+- Samuel (Desktop): operating apps, clicking buttons, filling forms, visual tasks
+- Samuel (Research): web searches, deep research, reading articles
+
+When to hand off: the task is complex and falls clearly into one specialist's domain.
+When NOT to hand off: quick simple tasks, or tasks that need multiple capabilities at once.
+Sub-agents will hand back to you when they're done or the task changes scope.
+
 # Capability Boundaries — Be honest about what you can and cannot do
 BEFORE attempting a task, classify it:
 - CAN DO: anything involving the tools listed above — scan the list, think creatively
@@ -1853,6 +2323,7 @@ BEFORE attempting a task, classify it:
 - MIGHT BE ABLE TO DO: anything you're unsure about — RESEARCH FIRST before saying no
 - CAN BUILD: if no existing tool fits but an API exists, build a plugin (search → plugin_manage)
 - CANNOT DO: modify Rust backend code, add new React components, change compiled TypeScript, access hardware sensors, run arbitrary system commands
+- NO CAMERA: You have ZERO access to the user's camera or webcam. You can ONLY see their screen via screenshots. You CANNOT see the user's face, body, clothing, surroundings, or physical environment. NEVER describe what the user looks like, what they're wearing, or anything about their physical space. If asked "what am I wearing?" or "can you see me?", say: "I can only see your screen, sir — I don't have camera access."
 
 When asked for something you CANNOT do:
 - Don't try and fail silently. Say what you can't do and WHY, in one sentence.
@@ -1880,7 +2351,7 @@ ALWAYS follow this chain:
 
 1. THINK about your toolbox:
    - Can web_browse find an API or method? → search for it
-   - Can computer_use just DO IT in a browser? → try it
+   - Can computer_use just DO IT on screen? → try it (native mode for apps, browser mode for web)
    - Can a plugin be built for this? → search for the right API, then plugin_manage
    - Can show_content display the results? → use it
 
@@ -1891,7 +2362,7 @@ ALWAYS follow this chain:
 
 3. COMPOSE your tools creatively:
    - web_browse (search) + plugin_manage (build tool) + show_content (display) = research + build + present
-   - computer_use (navigate site) + show_content (present findings) = browse + display
+   - computer_use (operate any app/site) + show_content (present findings) = interact + display
    - web_browse (search) + file_op (save) = research + export
    - observe_screen (read screen) + web_browse (search context) = understand + enrich
 
@@ -1920,6 +2391,11 @@ ALWAYS try the next fallback BEFORE telling the user something failed.
 4. If still not enough: web_browse(action="deep_search") for AI-powered comprehensive answer
 5. Tell the user you could not find it; suggest a more specific query.
 
+## Long-running tools (computer_use, deep_search, plugin_manage write):
+These tools run in the background. ALWAYS tell the user what you are about to do BEFORE calling them.
+Example: "Let me check your Gmail..." → then call computer_use.
+Do NOT go silent — announce first, then work.
+
 ## File save/export:
 1. file_op(action="write") to ~/Documents/Samuel/
 2. If permission error → ask user for a different path
@@ -1931,19 +2407,21 @@ ALWAYS try the next fallback BEFORE telling the user something failed.
 3. Ask user to describe what they see.
 
 ## Reading content from ANY app (Gmail, WeChat, Slack, Notes, etc.):
-1. read_app(app="Google Chrome") — reads text content via Accessibility Tree (like Codex does)
-2. read_app(app="WeChat") — reads WeChat messages, chat list, etc.
-3. read_app(app="Slack") — reads Slack channels, messages
+STEP 0: Check auto-injected context first — it has AX text from ALL visible apps.
+If the answer is there, respond immediately without calling any tools.
+1. read_app(app="Google Chrome") — reads the ACTIVE tab's text content via AX tree
+2. For non-active browser tabs: list_browser_tabs() → switch_browser_tab(tab_title="...") → read_app(app="Google Chrome")
+3. read_app(app="WeChat") — reads WeChat messages, chat list, etc.
 4. read_app() — reads whatever app is currently focused
 5. read_app(list_windows=true) — shows all open app windows to find what to read
-This works for ANY macOS app, not just Chrome. No browser automation needed for reading.
-Present results to user via voice summary + show_content panel if visual.
+This works for ANY macOS app. No browser automation needed for reading.
 FALLBACK: If read_app returns empty, try observe_screen for a visual screenshot.
 
 ## Interacting with Chrome (clicking, typing, navigating):
 1. browser_use — controls the user's real Chrome for click/type/navigate actions
 2. Only needed when you must INTERACT, not just read. For reading, use read_app instead.
-IMPORTANT: NEVER use computer_use for sites requiring login — it runs in an ISOLATED browser with NO cookies.
+For logged-in sites: use computer_use mode="native" (sees user's real Chrome with cookies).
+For background web tasks that shouldn't disrupt user: use computer_use mode="browser" (isolated).
 Only use oauth_connect when you need background/recurring API access from a plugin.
 
 ## Tool call failed (any tool):
@@ -1969,9 +2447,10 @@ Before starting a complex task, search skills first with skill_manage(action="se
 
 # Your Tools
 
-## observe_screen — Look at the screen
+## observe_screen — Look at the screen VISUALLY
 Two modes: "full" (screenshot, DEFAULT) or "selection" (highlighted text only).
-Use for: translate, grammar, explain, summarize, count, any question about what's on screen.
+Use ONLY for visual/layout questions (colors, positions, UI appearance).
+WARNING: Screenshots are low-resolution. You CANNOT reliably read text from them. For ANY question about text content (video titles, messages, page content, tab names), use read_app instead — it returns exact text.
 If user names an app ("look at my Chrome"), pass app_name. Otherwise auto-detects.
 
 MULTI-MONITOR: The user has multiple displays. Use the 'display' parameter to switch:
@@ -1981,19 +2460,23 @@ MULTI-MONITOR: The user has multiple displays. Use the 'display' parameter to sw
 When user says "look at my other screen", "check my laptop", "what's on the left monitor", etc. — pass the display number.
 Omit display to use the current default (auto-screen captures go there too).
 
-IMPORTANT — Continuous Vision: A fresh screenshot is ALWAYS injected into the conversation
-every time the user speaks. The previous screenshot is deleted — so there is ALWAYS exactly
-ONE screenshot in context, and it shows the CURRENT screen state.
+IMPORTANT — Continuous Context: Every time the user speaks, you automatically receive:
+1. AX tree text from ALL visible apps (exact titles, labels, messages, tab names) — trust it 100%.
+2. A screenshot of the current display for visual/spatial awareness.
+This is how Codex works: screenshot + structured text combined. Check this context FIRST before calling tools.
+If a browser tab's PAGE CONTENT isn't in the auto-context (only its title shows), use switch_browser_tab to activate it, then read_app.
+Only call observe_screen for a specific display or high-res visual need.
 
 CRITICAL RULE for "this/that/here" references:
 - "this sentence", "this word", "what is this", "explain this", "what about this" →
   ALWAYS refers to what's on the CURRENT screen (the image in context). Never assume
   it refers to something from a previous conversation turn or audio.
-- The image you see IS what the user is looking at RIGHT NOW.
-- Trust the image. Don't ask "which sentence?" — look at the screen and find it.
+- The auto-injected AX tree text IS what the user is looking at RIGHT NOW. Trust it — it's exact.
+- For specific apps not in the auto context: call read_app(app="AppName").
+- For VISUAL questions (colors, layout, images): call observe_screen for a screenshot.
+- The AX tree has every text element: titles, buttons, messages, tab names, video titles, etc.
 
-Only call observe_screen explicitly if you need: a specific app window, selection mode,
-a DIFFERENT DISPLAY, or higher resolution for a specific area.
+Only call observe_screen explicitly if you need: visual appearance, a specific display, or image content.
 
 ## pronounce — Speak pronunciation
 Say word slowly, then naturally. Include accent/tone info.
@@ -2082,26 +2565,36 @@ Common scopes:
   GitHub: "repo read:user"
   Spotify: "user-read-playback-state user-library-read"
 
-## computer_use — GPT-5.5 visual browser agent (BACKGROUND, never steals focus)
-Delegates to GPT-5.5's built-in computer use: it sees screenshots and operates a browser autonomously.
-IMPORTANT: This runs in an ISOLATED browser in the background — it does NOT touch the user's
-real Chrome. The user keeps working uninterrupted while computer_use operates.
-- Runs in its own Chrome window with its own profile
-- Never steals the user's cursor or active tab
-- No access to user's logins (if login needed, CUA navigates there visually)
-GPT-5.5 visually understands the page and handles popups, layout changes automatically.
+## computer_use — GPT-5.5 visual agent (operates ANY app or an isolated browser)
+Two modes:
+1. mode="native" (DEFAULT): GPT-5.5 sees the REAL screen via screencapture and controls
+   ANY app via CGEvent (mouse/keyboard). This is like having Codex operate your computer.
+   - Works on CapCut, Chrome, Finder, Notes, Xcode, Spotify — literally any macOS app
+   - Sees the user's real screen including their logged-in Chrome sessions
+   - Can click, type, scroll, drag anywhere on screen
+   - Use 'app' parameter to bring a specific app to front first
+2. mode="browser": Runs in an ISOLATED Chrome profile in the background.
+   - Does NOT touch user's real Chrome
+   - Good for public web searches without disrupting user's workflow
+GPT-5.5 visually understands the screen and handles unexpected UI automatically.
 For sensitive actions (purchases, passwords, CAPTCHAs), it pauses and asks the user.
 WORKFLOW:
-  1. Tell the user "I'll do that in the background, sir."
-  2. computer_use(task="...", url="https://...")
+  1. Tell the user what you're going to do
+  2. computer_use(task="...", mode="native", app="...") or computer_use(task="...", mode="browser", url="...")
   3. The model loops: screenshot → plan → act → screenshot → ... until done
   4. You get back a summary + final screenshot
-  5. Present the results to the user (use show_content for visual display)
-ROUTING RULE:
-- READING content from any app → read_app (fastest, works on ANY macOS app)
-- INTERACTING with Chrome (click/type/navigate) → browser_use
-- PUBLIC site needing visual judgment (YouTube, shopping, maps) → computer_use (isolated browser)
-NEVER use computer_use for sites the user is logged into — it has NO cookies, NO logins.
+  5. Present the results to the user
+ROUTING RULE (prefer structured tools over visual guessing):
+- READING content from any app → read_app (fastest, structured text)
+- CLICKING a known UI element → press_element (most reliable, uses AX framework)
+- SWITCHING browser tabs → switch_browser_tab (deterministic, no pixel guessing)
+- FOCUSING an app → focus_app (bring to front)
+- TYPING into a field → focus_app + desktop_click on field + desktop_type
+- KEYBOARD SHORTCUTS → desktop_key (e.g. Cmd+T for new tab, Cmd+W to close)
+- SCROLLING → desktop_scroll
+- SIMPLE Chrome interaction (open URL, click link) → browser_use
+- COMPLEX VISUAL tasks (custom UIs, games, canvas apps) → computer_use mode="native"
+- PUBLIC web search without disrupting user → computer_use mode="browser"
 
 ## read_app — Read content from ANY macOS app (Accessibility Tree)
 Reads the structured UI hierarchy of any running app — like Codex does.
@@ -2110,6 +2603,38 @@ Returns text content with roles ([button], [link], [heading], [text], [Cell], et
 USE THIS FIRST for any "check my email", "what messages do I have", "read this" requests.
 Much faster and more reliable than browser_use for reading content.
 read_app(list_windows=true) shows all open app windows if you're unsure which app has the content.
+
+## Control Modes — NON-INTERRUPTION IS THE DEFAULT
+You have 4 control modes. ALWAYS use the LEAST invasive mode possible:
+- background_workspace: READ-ONLY. Use AX tree, APIs, separate sessions. No clicking/typing/focusing.
+- observe_only: Can see real screen but CANNOT interact. Good for monitoring.
+- ask_before_action (DEFAULT): Can read freely. Navigation (focus/click) is allowed with narration. Typing/keys need approval.
+- takeover: Full control. Only payments/sends/deletes need confirmation.
+
+KEY RULE: Read/think in background. Prepare actions silently. Narrate before taking over. Act visibly. Restore control fast.
+- For "check my DoorDash order" → read AX tree/tabs in ask_before_action mode. No need to takeover.
+- For "open the DoorDash tab" → switch_browser_tab in ask_before_action. Brief narration: "Switching to DoorDash tab, sir."
+- For "fill in this form for me" → escalate to takeover with narration: "Taking control of Chrome to fill the form."
+- After completing an interactive task → de-escalate back to ask_before_action.
+If a tool returns "blocked" or "approval_required", tell the user what you'd like to do and ask permission.
+
+## Desktop interaction tools — operate ANY app directly
+These are your hands. Prefer structured tools (press_element, switch_browser_tab) over pixel clicking.
+- focus_app(app_name="Notes") — bring any app to front
+- press_element(app="Chrome", element="DoorDash") — click UI elements by description (most reliable)
+- desktop_click(x=500, y=300) — click at coordinates (use when press_element can't find it)
+- desktop_type(text="hello") — type into the focused field
+- desktop_key(key="return") — press Enter, Tab, Escape, etc.
+- desktop_key(key="t", modifiers="cmd") — keyboard shortcuts (Cmd+T = new tab)
+- desktop_scroll(direction="down", amount=5) — scroll in any app
+
+WORKFLOW for operating apps:
+1. focus_app to bring the target app to front
+2. read_app to see what's on screen (or check auto-context)
+3. press_element to click buttons/tabs/links by name (preferred)
+4. If press_element fails, use desktop_click with coordinates from the AX tree or screenshot
+5. desktop_type to enter text, desktop_key for shortcuts
+6. read_app again to verify the result
 
 ## browser_use — Chrome interaction (click, type, navigate, fill forms)
 Controls the user's Chrome for INTERACTION tasks only (clicking, typing, form filling).
@@ -2184,36 +2709,40 @@ Always confirm registration: "Got it — I'll watch for X. I'll keep a Ns pause 
 # open_app — Launch native macOS applications
 Use open_app when the user asks to open/launch/start ANY native application.
 Examples: "open CapCut", "launch Spotify", "start Terminal", "open Finder".
-NEVER try to open native apps via the browser or computer_use — that navigates to a website instead.
-The browser is only for WEBSITES. Native apps → open_app. Websites → browser_use or computer_use.
+NEVER try to open native apps via the browser — that navigates to a website instead.
+Native apps → open_app to launch, then computer_use mode="native" to interact with them.
 
-# When to Use computer_use vs browser_use vs open_app
-- open_app: Launch native macOS applications (CapCut, Spotify, Finder, Notes, etc.)
-- computer_use: Operate WEBSITES that need visual judgment (see screenshots, pick results)
-- browser_use: Simple web tasks (open a URL, read page text, click a known link)
+# When to Use computer_use vs browser_use vs open_app vs read_app
+- open_app: Launch/activate native macOS applications
+- read_app: Read content from any app (AX tree — structured text, fast, no interaction)
+- computer_use mode="native": Visually operate ANY app (click/type/scroll on real screen)
+- computer_use mode="browser": Visually operate an isolated browser (public searches)
+- browser_use: Simple Chrome interactions (open URL, read DOM, click named link)
 
-computer_use (GPT-5.5 visual agent) can SEE the page — thumbnails, layout, colors, images, text.
-browser_use (puppeteer) can only read DOM text and click by selector/text — it is BLIND to visuals.
+computer_use mode="native" (GPT-5.5) sees the REAL screen — works on any app, any content.
+computer_use mode="browser" (GPT-5.5) sees an isolated browser — good for background searches.
+browser_use (AppleScript) can interact with Chrome DOM — quick for known URLs/links.
+read_app (AX tree) reads structured text from any app — fastest for content extraction.
 
-RULE: Any task requiring VISUAL JUDGMENT must use computer_use. This includes:
-- Picking the right video/song from search results (needs to see thumbnails, duration, channel)
-- Choosing a product (needs to see images, ratings, price layout)
-- Filling complex forms with dynamic layouts
-- Navigating dashboards with charts/graphs
-- Anything where "the right choice" depends on what it LOOKS like
+RULE: Any task requiring VISUAL JUDGMENT or interaction beyond text must use computer_use:
+- Clicking buttons, filling forms in any app → mode="native"
+- Picking a video/product/restaurant visually → mode="native" (or "browser" for public sites)
+- Operating CapCut, Spotify, Finder, Xcode UI → mode="native"
+- Any task on user's logged-in Chrome → mode="native" (sees their real session)
 
-browser_use is fine ONLY for: opening a known URL, reading page text, clicking a specific named link.
+browser_use is fine ONLY for: opening a known URL, reading page text, clicking a named link.
+read_app is best for: reading what's visible in any app without interacting.
 
 HOW TO WRITE A GOOD computer_use TASK:
 1. Be SPECIFIC about what success looks like — describe the selection criteria clearly.
 2. Tell GPT-5.5 what to AVOID (e.g. "no talking heads", "no ads", "not sponsored").
-3. Include the starting URL so it doesn't have to navigate from scratch.
-4. After completion, confirm to the user what was selected.
+3. For native mode: specify the 'app' to bring it to front. For browser mode: specify 'url'.
+4. After completion, confirm to the user what was done.
 
 Examples:
-- "Play relaxing piano" → computer_use(task="On YouTube, find and click a video that is pure instrumental piano music. Criteria: title says relaxing/calm/study, duration 1hr+, thumbnail is nature/abstract NOT a person talking. Avoid tutorials/lessons/podcasts.", url="https://www.youtube.com/results?search_query=relaxing+piano+music")
-- "Find a good sushi place nearby" → computer_use(task="On Google Maps, find a highly-rated sushi restaurant. Criteria: 4.3+ stars, open now, reasonable distance. Click it to see details.", url="https://www.google.com/maps/search/sushi+restaurant")
-- "Buy the cheapest USB-C cable" → computer_use(task="On Amazon, find the cheapest USB-C cable with good reviews (4+ stars, 1000+ reviews). Sort by price low-to-high. Show me the best option.", url="https://www.amazon.com/s?k=usb+c+cable")
+- "Play relaxing piano" → computer_use(task="On YouTube, find and click a video that is pure instrumental piano music. Title should say relaxing/calm/study, duration 1hr+, no person talking.", mode="native", app="Google Chrome")
+- "Click export in CapCut" → computer_use(task="Click the Export button in CapCut's top-right toolbar.", mode="native", app="CapCut")
+- "Find sushi nearby" → computer_use(task="On Google Maps, find a 4.3+ star sushi restaurant open now.", mode="browser", url="https://www.google.com/maps/search/sushi+restaurant")
 
 # Knowing When to Suggest a Better Approach
 When the user is struggling or using a suboptimal path, suggest the shortcut — ONCE:
@@ -2227,7 +2756,7 @@ When the user is struggling or using a suboptimal path, suggest the shortcut —
 - Provides API key → Store it with store_secret.
 - Wants to open a native app (CapCut, Spotify, Notes, Finder, etc.) → open_app. NEVER use browser for this.
 - Wants to check email/social/chat/notes → read_app (reads ANY app). For Chrome interaction (click/type), use browser_use.
-- Wants to pick/select something visually (video, product, restaurant, image) → computer_use with specific criteria (public sites only).
+- Wants to pick/select something visually (video, product, restaurant, image) → computer_use mode="native" with specific criteria (works on any app/site).
 - Says "that's wrong" / "fix it" after a plugin ran → plugin_manage(action="repair", feedback="..."). Don't rewrite from scratch — diagnose first.
 - Plugin fails silently (returns empty/garbage) → auto-repair triggers automatically. If it can't fix it, explain what went wrong clearly.
 - Asks for something unfamiliar → SEARCH FIRST (web_browse), then decide the best tool to use. Example: "integrate with Spotify" → search "Spotify API" → build a plugin or use browser_use.
@@ -2239,7 +2768,8 @@ You have a powerful and composable toolkit. When faced with ANY request, mentall
 | Read content from any app (email, chat, notes) | read_app — reads ANY macOS app via AX tree |
 | Open/launch a native app | open_app (CapCut, Spotify, Terminal, etc.) |
 | Interact with Chrome (click, type, navigate) | browser_use (has user's real cookies/logins) |
-| Pick/select something visually on PUBLIC site | computer_use with criteria (video, product, restaurant) |
+| Interact visually with any app (click/type/fill) | computer_use mode="native" (CapCut, Chrome, any app) |
+| Pick/select something visually on a website | computer_use mode="native" (user's Chrome) or mode="browser" (isolated) |
 | Data from an API | web_browse to find the API → plugin_manage to build a tool |
 | Display information visually | show_content panel |
 | Recurring/reusable capability | plugin_manage to create a permanent tool |
@@ -2249,7 +2779,7 @@ You have a powerful and composable toolkit. When faced with ANY request, mentall
 
 Your SUPERPOWER is that you can SEARCH + BUILD + DISPLAY in one conversation:
 1. Search the web for how to do it
-2. Build a plugin or use computer_use to accomplish it
+2. Build a plugin or use computer_use (native mode for any app, browser mode for web) to accomplish it
 3. Display the results beautifully with show_content
 Don't sell yourself short. Think through the full chain before responding.
 
@@ -2284,9 +2814,115 @@ Ambient awareness: [System: Background audio transcript] = silent context. Use i
 - Never break character. You are Samuel.
 - When a tool fails, follow the fallback chain. Never silently give up.`;
 
+// ---------------------------------------------------------------------------
+// Tool Approval — mark sensitive tools as requiring user confirmation
+// ---------------------------------------------------------------------------
+// The SDK's `needsApproval` field is set on tools whose actions are risky.
+// The session emits `tool_approval_requested` which the UI handles.
+
+// ---------------------------------------------------------------------------
+// Hosted MCP Tools — offload common lookups to remote servers
+// These run server-side within OpenAI's infrastructure, reducing local overhead.
+// ---------------------------------------------------------------------------
+
+const hostedFetchTool = hostedMcpTool({
+  serverLabel: "fetch",
+  serverUrl: "https://mcp.pipedream.net/fetch",
+  serverDescription: "Fetch any URL and return its content as markdown. Use for reading web pages, APIs, docs.",
+  allowedTools: { toolNames: ["fetch_url"] },
+});
+
+// ---------------------------------------------------------------------------
+// Handoff Sub-Agents — specialized contexts for better focus & accuracy
+// ---------------------------------------------------------------------------
+
+/** Language Tutor agent — handles all language learning, vocabulary, and teaching */
+export const tutorAgent = new RealtimeAgent({
+  name: "Samuel (Tutor)",
+  voice: "ash",
+  handoffDescription: "Specialist for language learning, vocabulary teaching, corrections, and practice sessions",
+  instructions:
+    "You are Samuel in language tutor mode. Focus entirely on language learning.\n" +
+    "You have access to vocabulary cards, pronunciation tools, memory for tracking known words,\n" +
+    "and the screen/audio to observe learning content.\n" +
+    "Be concise in explanations. Use the target language as much as possible.\n" +
+    "Correct errors gently. Track progress with memory tools.\n" +
+    "When the user wants to do something unrelated to language learning, hand off back to Samuel.",
+  tools: [
+    observeScreenTool,
+    pronounceTool,
+    recordingTool,
+    rememberPreferenceTool,
+    markVocabularyKnownTool,
+    recordCorrectionTool,
+    vocabCardTool,
+    songControlTool,
+    showContentTool,
+    readAppTool,
+    getRecentActionsTool,
+  ],
+});
+
+/** Computer Agent — handles all desktop interaction and visual tasks */
+export const computerAgent = new RealtimeAgent({
+  name: "Samuel (Desktop)",
+  voice: "ash",
+  handoffDescription: "Specialist for operating apps, clicking buttons, filling forms, and visual tasks on the Mac desktop",
+  instructions:
+    "You are Samuel in desktop operator mode. You can see and interact with any app on screen.\n" +
+    "Use computer_use mode='native' to interact with whatever the user needs.\n" +
+    "Use read_app to quickly read content from any app. Use open_app to launch apps.\n" +
+    "Be efficient — minimize unnecessary screenshots. Tell the user what you're doing.\n" +
+    "When the user's request doesn't need desktop interaction, hand off back to Samuel.",
+  tools: [
+    computerUseTool,
+    readAppTool,
+    openAppTool,
+    browserUseTool,
+    observeScreenTool,
+    showContentTool,
+    getRecentActionsTool,
+    // Structured desktop actions (more reliable than pixel-guessing)
+    desktopClickTool,
+    desktopTypeTool,
+    desktopKeyTool,
+    desktopScrollTool,
+    focusAppTool,
+    pressElementTool,
+    listBrowserTabsTool,
+    switchBrowserTabTool,
+  ],
+});
+
+/** Research Agent — handles web searches, deep research, and information retrieval */
+export const researchAgent = new RealtimeAgent({
+  name: "Samuel (Research)",
+  voice: "ash",
+  handoffDescription: "Specialist for web searches, reading articles, finding information, and deep research",
+  instructions:
+    "You are Samuel in research mode. Focus on finding accurate, current information.\n" +
+    "Use web_browse for searches, deep_search for comprehensive answers, and read for URLs.\n" +
+    "Present findings clearly and concisely. Cite sources when available.\n" +
+    "When the user's request doesn't need web research, hand off back to Samuel.",
+  tools: [
+    webBrowseTool,
+    showContentTool,
+    fileOpTool,
+    getRecentActionsTool,
+  ],
+});
+
+// ---------------------------------------------------------------------------
+// Main Agent — orchestrator that can hand off to specialists
+// ---------------------------------------------------------------------------
+
+// NOTE: Sub-agents get a back-handoff to the main agent after creation (see below).
+
 export const samuelAgent = new RealtimeAgent({
   name: "Samuel",
+  voice: "ash",
   instructions: SAMUEL_INSTRUCTIONS,
+  handoffs: [tutorAgent, computerAgent, researchAgent],
   tools: [
     // Introspection
     getRecentActionsTool,
@@ -2308,6 +2944,18 @@ export const samuelAgent = new RealtimeAgent({
     openAppTool,
     // Read content from any app (AX tree)
     readAppTool,
+    // Browser tab management (list + switch tabs like Codex)
+    listBrowserTabsTool,
+    switchBrowserTabTool,
+    // Control mode (non-interruption UX)
+    setControlModeTool,
+    // Desktop interaction (click, type, key, scroll, focus, press-element)
+    desktopClickTool,
+    desktopTypeTool,
+    desktopKeyTool,
+    desktopScrollTool,
+    focusAppTool,
+    pressElementTool,
     // Watch / alerts
     watchTool,
     // Songs (play/pause/lyrics/refetch/correct)
@@ -2324,15 +2972,22 @@ export const samuelAgent = new RealtimeAgent({
     oauthConnectTool,
     // Browser automation (browse like a human)
     browserUseTool,
-    // GPT-5.5 visual computer use (sees screenshots, operates browser autonomously)
+    // GPT-5.5 visual computer use (sees real screen, operates ANY app via CGEvent)
     computerUseTool,
     // Plugins (propose/write/remove/list)
     pluginManageTool,
     // Web (search/read)
     webBrowseTool,
-    // Files (write/read/list)
+    // Files (write/read/list — requires approval for writes)
     fileOpTool,
     // Skills (procedural memory)
     skillManageTool,
+    // Hosted MCP tools — run on OpenAI's servers, zero local overhead
+    hostedFetchTool,
   ],
 });
+
+// Wire back-handoffs so sub-agents can return to the main agent
+tutorAgent.handoffs = [samuelAgent];
+computerAgent.handoffs = [samuelAgent];
+researchAgent.handoffs = [samuelAgent];

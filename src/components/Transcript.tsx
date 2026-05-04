@@ -1,14 +1,26 @@
 import { useEffect, useRef } from "react";
 import type { TranscriptEntry } from "../hooks/useRealtime";
+import { ToolApprovalCard } from "./ToolApprovalCard";
 
 type AgentState = "idle" | "listening" | "thinking" | "speaking";
 
 interface TranscriptProps {
   entries: TranscriptEntry[];
   agentState?: AgentState;
+  onApproveToolCall?: (entryId: string) => void;
+  onDenyToolCall?: (entryId: string) => void;
+  onAlwaysAllowApp?: (entryId: string, appName: string) => void;
+  onAlwaysDenyApp?: (entryId: string, appName: string) => void;
 }
 
-export function Transcript({ entries, agentState }: TranscriptProps) {
+export function Transcript({
+  entries,
+  agentState,
+  onApproveToolCall,
+  onDenyToolCall,
+  onAlwaysAllowApp,
+  onAlwaysDenyApp,
+}: TranscriptProps) {
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -35,9 +47,20 @@ export function Transcript({ entries, agentState }: TranscriptProps) {
 
   return (
     <div className="transcript-scroll flex-1 overflow-y-auto px-4 py-3 space-y-3">
-      {entries.map((entry) => (
-        <TranscriptBubble key={entry.id} entry={entry} />
-      ))}
+      {entries.map((entry) =>
+        entry.role === "approval" && entry.approval ? (
+          <ToolApprovalCard
+            key={entry.id}
+            entry={entry}
+            onApprove={onApproveToolCall ?? (() => {})}
+            onDeny={onDenyToolCall ?? (() => {})}
+            onAlwaysAllow={onAlwaysAllowApp}
+            onAlwaysDeny={onAlwaysDenyApp}
+          />
+        ) : (
+          <TranscriptBubble key={entry.id} entry={entry} />
+        ),
+      )}
 
       {showThinking && <ThinkingIndicator />}
       {showListening && <ListeningIndicator />}

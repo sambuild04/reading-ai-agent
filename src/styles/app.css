@@ -17,6 +17,18 @@ html, body, #root {
   -webkit-font-smoothing: antialiased;
 }
 
+/* ── Electron drag region (replaces Tauri data-tauri-drag-region) ────── */
+.drag-region {
+  -webkit-app-region: drag;
+}
+.drag-region button,
+.drag-region input,
+.drag-region a,
+.drag-region [role="button"],
+.drag-region select {
+  -webkit-app-region: no-drag;
+}
+
 /* ── Character Stage ─────────────────────────────────────── */
 .character-stage {
   flex: 1;
@@ -153,11 +165,35 @@ html, body, #root {
 
 /* ── State Indicators ────────────────────────────────────── */
 .character-hint {
-  color: #1e293b;
-  font-size: 16px;
-  font-weight: 600;
+  color: #94a3b8;
+  font-size: 14px;
+  font-weight: 500;
   text-shadow: none;
   animation: gentle-pulse 2.5s ease-in-out infinite;
+}
+
+.wake-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(6, 182, 212, 0.12);
+  border: 1px solid rgba(6, 182, 212, 0.3);
+  border-radius: 20px;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  -webkit-app-region: no-drag;
+}
+
+.wake-button:hover {
+  background: rgba(6, 182, 212, 0.25);
+  border-color: rgba(6, 182, 212, 0.5);
+  color: #e2e8f0;
+  transform: scale(1.03);
+}
+
+.wake-button:active {
+  transform: scale(0.97);
 }
 
 .character-listening {
@@ -1935,4 +1971,200 @@ html, body, #root {
   font-size: var(--lyrics-font-size, 12px);
   color: rgba(226, 232, 240, 0.85);
   line-height: 1.4;
+}
+
+/* ── Tool Approval Card ──────────────────────────────────────────────── */
+
+.tool-approval-float {
+  align-self: center;
+  width: 90%;
+  max-width: 320px;
+  z-index: 10;
+  animation: approval-slide-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  -webkit-app-region: no-drag;
+}
+
+@keyframes approval-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.tool-approval-card {
+  background: rgba(15, 23, 42, 0.88);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-radius: 16px;
+  padding: 14px 16px;
+  border: 1px solid rgba(6, 182, 212, 0.2);
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.tool-approval-pending {
+  border-color: rgba(6, 182, 212, 0.35);
+  box-shadow:
+    0 0 0 1px rgba(6, 182, 212, 0.08),
+    0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.tool-approval-resolved {
+  opacity: 0.7;
+  border-color: rgba(100, 116, 139, 0.2);
+  padding: 10px 14px;
+}
+
+.tool-approval-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tool-approval-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(6, 182, 212, 0.1);
+  border-radius: 10px;
+}
+
+.tool-approval-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.tool-approval-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e2e8f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool-approval-tool-id {
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.7);
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+}
+
+.tool-approval-expand {
+  display: block;
+  margin-top: 8px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: rgba(6, 182, 212, 0.7);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.tool-approval-expand:hover {
+  color: rgba(6, 182, 212, 1);
+}
+
+.tool-approval-args {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 8px;
+  font-size: 10px;
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+  color: #94a3b8;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.tool-approval-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.tool-approval-btn {
+  flex: 1;
+  padding: 8px 0;
+  border: none;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
+}
+
+.tool-approval-btn:active {
+  transform: scale(0.97);
+}
+
+.tool-approval-btn-approve {
+  background: rgba(6, 182, 212, 0.25);
+  color: #22d3ee;
+  border: 1px solid rgba(6, 182, 212, 0.3);
+}
+
+.tool-approval-btn-approve:hover {
+  background: rgba(6, 182, 212, 0.4);
+}
+
+.tool-approval-btn-deny {
+  background: rgba(239, 68, 68, 0.12);
+  color: rgba(248, 113, 113, 0.9);
+  border: 1px solid rgba(239, 68, 68, 0.15);
+}
+
+.tool-approval-btn-deny:hover {
+  background: rgba(239, 68, 68, 0.25);
+}
+
+.tool-approval-badge {
+  margin-top: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.tool-approval-badge-approved {
+  color: rgba(34, 211, 238, 0.8);
+}
+
+.tool-approval-badge-denied {
+  color: rgba(248, 113, 113, 0.7);
+}
+
+.tool-approval-btn-always {
+  background: rgba(34, 197, 94, 0.15);
+  color: rgba(74, 222, 128, 0.9);
+  border: 1px solid rgba(34, 197, 94, 0.25);
+  flex: 0.7;
+  font-size: 12px;
+}
+
+.tool-approval-btn-always:hover {
+  background: rgba(34, 197, 94, 0.3);
+}
+
+.tool-approval-app-hint {
+  margin-top: 8px;
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.6);
+  text-align: center;
+}
+
+.tool-approval-app-hint strong {
+  color: rgba(6, 182, 212, 0.8);
+  font-weight: 600;
 }

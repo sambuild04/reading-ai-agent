@@ -34,6 +34,11 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
 
 static DEFAULT_DISPLAY: AtomicU32 = AtomicU32::new(1);
 
+/// Public accessor for current default display index (used by cua.rs native mode)
+pub fn get_default_display() -> u32 {
+    DEFAULT_DISPLAY.load(Ordering::Relaxed)
+}
+
 // Holds the child process for the system audio recorder (Swift helper)
 static RECORDING_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
 
@@ -287,6 +292,157 @@ pub async fn list_app_windows() -> Result<String, String> {
     let content = String::from_utf8_lossy(&output.stdout).to_string();
     eprintln!("[ax-tree] listed windows: {} lines", content.lines().count());
     Ok(content)
+}
+
+/// Execute a native desktop input action via CGEvent (mouse/keyboard on any app).
+/// Actions: click, double_click, move, type, keypress, scroll, drag
+#[tauri::command]
+pub async fn native_computer_action(
+    action: String,
+    x: Option<f64>,
+    y: Option<f64>,
+    button: Option<String>,
+    text: Option<String>,
+    keys: Option<Vec<String>>,
+    scroll_x: Option<i32>,
+    scroll_y: Option<i32>,
+    path: Option<Vec<(f64, f64)>>,
+) -> Result<String, String> {
+    let helper = std::env::current_dir()
+        .unwrap_or_default()
+        .join("helpers")
+        .join("native-input.swift");
+
+    let helper_path = if helper.exists() {
+        helper
+    } else {
+        let alt = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("helpers")
+            .join("native-input.swift");
+        if alt.exists() { alt } else { helper }
+    };
+
+    let mut args: Vec<String> = vec![helper_path.to_str().unwrap_or("helpers/native-input.swift").to_string()];
+    args.push(action.clone());
+
+    match action.as_str() {
+        "click" => {
+            let px = x.unwrap_or(0.0);
+            let py = y.unwrap_or(0.0);
+            args.push(px.to_string());
+            args.push(py.to_string());
+            if let Some(ref btn) = button {
+                args.push(btn.clone());
+            }
+        }
+        "double_click" => {
+            args.push(x.unwrap_or(0.0).to_string());
+            args.push(y.unwrap_or(0.0).to_string());
+        }
+        "move" => {
+            args.push(x.unwrap_or(0.0).to_string());
+            args.push(y.unwrap_or(0.0).to_string());
+        }
+        "scroll" => {
+            args.push(x.unwrap_or(0.0).to_string());
+            args.push(y.unwrap_or(0.0).to_string());
+            args.push(scroll_x.unwrap_or(0).to_string());
+            args.push(scroll_y.unwrap_or(0).to_string());
+        }
+        "type" => {
+            if let Some(ref t) = text {
+                args.push(t.clone());
+            }
+        }
+        "keypress" => {
+            if let Some(ref k) = keys {
+                for key in k {
+                    args.push(key.clone());
+                }
+            }
+        }
+        "drag" => {
+            if let Some(ref pts) = path {
+                for (px, py) in pts {
+                    args.push(px.to_string());
+                    args.push(py.to_string());
+                }
+            }
+        }
+        _ => return Err(format!("Unknown action: {action}")),
+    }
+
+    eprintln!("[native-input] {action} (args: {:?})", &args[2..]);
+
+    let output = Command::new("/usr/bin/swift")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("native-input: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("native-input failed: {stderr}"));
+    }
+
+    let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(result)
+}
+
+/// Capture a full-resolution screenshot for the Computer interface (higher quality than auto-screen).
+/// Returns base64 PNG optimized for GPT-5.5 vision (1280px wide, ~150KB).
+#[tauri::command]
+pub async fn native_screenshot() -> Result<String, String> {
+    let tmp_png = "/tmp/samuel-cua-native.png";
+    let tmp_jpg = "/tmp/samuel-cua-native.jpg";
+
+    let _ = fs::remove_file(tmp_png);
+
+    let display_idx = DEFAULT_DISPLAY.load(Ordering::Relaxed);
+    let d_flag = format!("-D{display_idx}");
+    let sc = Command::new("/usr/sbin/screencapture")
+        .args(["-x", &d_flag, tmp_png])
+        .output()
+        .map_err(|e| format!("screencapture: {e}"))?;
+
+    if !sc.status.success() {
+        return Err("screencapture failed".to_string());
+    }
+
+    let data = fs::read(tmp_png).map_err(|e| format!("Read: {e}"))?;
+    if data.len() < 1000 {
+        let _ = fs::remove_file(tmp_png);
+        return Err("Captured image too small".to_string());
+    }
+
+    // For Computer interface: 1280px wide, quality 50 — higher fidelity for accurate clicking
+    let width = 1280;
+    let quality = 50;
+    let w_str = width.to_string();
+    let q_str = quality.to_string();
+
+    let sips_result = Command::new("/usr/bin/sips")
+        .args([
+            "--resampleWidth", &w_str,
+            "--setProperty", "format", "jpeg",
+            "--setProperty", "formatOptions", &q_str,
+            tmp_png,
+            "--out", tmp_jpg,
+        ])
+        .output();
+
+    let _ = fs::remove_file(tmp_png);
+
+    match sips_result {
+        Ok(output) if output.status.success() => {}
+        _ => return Err("Failed to resize screenshot".to_string()),
+    }
+
+    let jpg_data = fs::read(tmp_jpg).map_err(|e| format!("Read JPEG: {e}"))?;
+    let _ = fs::remove_file(tmp_jpg);
+
+    eprintln!("[native-screenshot] {} bytes ({}x, q={})", jpg_data.len(), width, quality);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&jpg_data);
+    Ok(b64)
 }
 
 /// Set macOS system volume (0-100).
@@ -2399,8 +2555,8 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
 
     eprintln!("[learning-audio] transcribing...");
 
-    // Map learning language name to ISO 639-1 code for Whisper
-    let lang_code = match language.to_lowercase().as_str() {
+    // Map learning language name to ISO 639-1 code for post-transcription filtering
+    let target_lang_code = match language.to_lowercase().as_str() {
         "japanese" => "ja",
         "chinese" | "mandarin" => "zh",
         "korean" => "ko",
@@ -2409,11 +2565,12 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
         "german" => "de",
         "italian" => "it",
         "portuguese" => "pt",
-        _ => "ja", // default to Japanese since that's the primary use case
+        _ => "ja",
     };
 
-    // gpt-4o-transcribe handles anime dialogue under music/SFX much better
-    // than gpt-4o-mini-transcribe — worth the cost for learning accuracy
+    // DO NOT force `language=<code>` — that makes Whisper hallucinate the target
+    // language when the actual audio is English/silence/music. Let auto-detect
+    // figure out the real language, then filter post-hoc.
     let whisper_output = Command::new("curl")
         .args([
             "-s",
@@ -2423,7 +2580,7 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
             "-H", &format!("Authorization: Bearer {api_key}"),
             "-F", &format!("file=@{LEARNING_AUDIO_PATH}"),
             "-F", "model=gpt-4o-transcribe",
-            "-F", &format!("language={lang_code}"),
+            "-F", "response_format=verbose_json",
             "-F", "prompt=Transcribe the dialogue speech accurately. There may be background music and sound effects — focus on the spoken words only. If no speech, return empty.",
         ])
         .output()
@@ -2453,9 +2610,48 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
         .trim()
         .to_string();
 
+    // Check detected language from verbose_json response
+    let detected_lang = whisper_body["language"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    if !detected_lang.is_empty() {
+        eprintln!("[learning-audio] detected language: {detected_lang}");
+    }
+
     if transcript.is_empty() || transcript.len() < 5 {
         eprintln!("[learning-audio] no speech detected");
         return Ok(empty);
+    }
+
+    // Check no_speech_prob — high values mean Whisper is uncertain there was speech
+    let no_speech_prob = whisper_body["segments"]
+        .as_array()
+        .and_then(|segs| segs.first())
+        .and_then(|s| s["no_speech_prob"].as_f64())
+        .unwrap_or(0.0);
+    if no_speech_prob > 0.7 {
+        eprintln!("[learning-audio] high no_speech_prob ({no_speech_prob:.2}), skipping");
+        return Ok(empty);
+    }
+
+    // Language mismatch filter: if Whisper auto-detected a different language than
+    // the target, the transcript is not in the language the user is learning.
+    // Still useful for context (English speech can be translated), but should NOT
+    // trigger the watch classifier for target-language vocabulary.
+    let lang_matches_target = detected_lang.is_empty()
+        || detected_lang == target_lang_code
+        || (target_lang_code == "zh" && (detected_lang == "zh" || detected_lang == "chinese"));
+    if !lang_matches_target {
+        eprintln!("[learning-audio] detected '{detected_lang}' but target is '{target_lang_code}', skipping watch triggers");
+        // Still return transcript for passive context, but hint=None prevents watch triggers
+        return Ok(AudioCheckResult {
+            transcript: Some(transcript),
+            hint: None,
+            clip_path: saved_clip_path,
+            pcm_audio_base64: pcm_base64,
+        });
     }
 
     // Filter Whisper hallucinations — common on silence, music, or white noise.
@@ -2512,7 +2708,7 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
     let ascii_ratio = lower.chars().filter(|c| c.is_ascii()).count() as f64
         / lower.chars().count().max(1) as f64;
     let non_latin_targets = ["ja", "zh", "ko"];
-    if non_latin_targets.contains(&lang_code) && ascii_ratio > 0.85 && transcript.len() > 20 {
+    if non_latin_targets.contains(&target_lang_code) && ascii_ratio > 0.85 && transcript.len() > 20 {
         eprintln!("[learning-audio] filtered English audio ({}% ASCII): {}",
             (ascii_ratio * 100.0) as u32, truncate_str(&transcript, 80));
         return Ok(empty);

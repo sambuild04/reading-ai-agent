@@ -164,6 +164,9 @@ pub fn run() {
             browser_command,
             browser_close,
             cua_run,
+            cua_run_native,
+            native_computer_action,
+            native_screenshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
